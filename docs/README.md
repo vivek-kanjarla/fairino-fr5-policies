@@ -2,6 +2,9 @@
 
 plain-English deep dives on each policy in this repo — what it is, how it works, the math, and how it differs from the others. read in this order; each builds on the last.
 
+> **how they differ at deployment** — query cadence, temporal ensembling, action queues, the
+> 30 Hz budget, and per-model latency are compared in one place in [`inference.md`](inference.md).
+>
 > **want to learn by coding?** [`exercises/`](exercises/) has from-scratch PyTorch exercises
 > (attention, CVAE, DDPM/DDIM, flow matching, DiT/AdaLN, FAST tokenization, temporal ensembling)
 > with stubs + self-checks + tested solutions. run `python docs/exercises/check_all.py`.

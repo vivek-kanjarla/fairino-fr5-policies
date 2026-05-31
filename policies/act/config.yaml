@@ -1,5 +1,5 @@
 dataset:
-  root: "../../so101-fr5-teleop/lerobot_dataset"
+  root: "../so101-fr5-teleop/lerobot_dataset"   # relative to repo root
   chunk_size: 100        # predict 100 steps at 30 Hz ≈ 3.3 s of future actions
   use_image: true
   image_size: [224, 224] # resize before feeding to backbone
@@ -26,6 +26,6 @@ training:
   kl_weight: 10.0        # passed to lerobot's ACTConfig — keep in sync with model.kl_weight
   save_every: 10
   log_every: 50
-  checkpoint_dir: "./checkpoints"
+  checkpoint_dir: "policies/act/checkpoints"
   device: "auto"         # auto | cuda | mps | cpu
   seed: 42

@@ -1,4 +1,5 @@
 import argparse
+import importlib.util
 import time
 from pathlib import Path
 
@@ -8,7 +9,22 @@ import yaml
 from torch.utils.data import DataLoader
 
 from dataset import FR5Dataset
-from model import ACT, ACTConfig
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def load_policy_module(policy: str):
+    """Import policies/<policy>/model.py, which must expose
+    build_model(cfg: dict, stats: dict, device) -> nn.Module."""
+    path = REPO_ROOT / "policies" / policy / "model.py"
+    if not path.exists():
+        raise SystemExit(f"unknown policy '{policy}': {path} not found")
+    spec = importlib.util.spec_from_file_location(f"policy_{policy}", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    if not hasattr(mod, "build_model"):
+        raise SystemExit(f"policies/{policy}/model.py must define build_model(cfg, stats, device)")
+    return mod
 
 
 def get_device(cfg):
@@ -47,25 +63,8 @@ def build_loaders(cfg):
     return train_loader, val_loader, train_ds
 
 
-def build_model(cfg, stats, device):
-    m = cfg["model"]
-    d = cfg["dataset"]
-    model_cfg = ACTConfig(
-        state_dim=m["state_dim"],
-        action_dim=m["action_dim"],
-        latent_dim=m["latent_dim"],
-        d_model=m["d_model"],
-        nhead=m["nhead"],
-        num_encoder_layers=m["num_encoder_layers"],
-        num_decoder_layers=m["num_decoder_layers"],
-        dim_feedforward=m["dim_feedforward"],
-        dropout=m["dropout"],
-        chunk_size=d["chunk_size"],
-        use_image=d["use_image"],
-        kl_weight=cfg["training"]["kl_weight"],
-        temporal_ensemble_coeff=m.get("temporal_ensemble_coeff"),  # from model: section
-    )
-    model = ACT(model_cfg, stats).to(device)
+def build_model(policy_mod, cfg, stats, device):
+    model = policy_mod.build_model(cfg, stats, device)
     n = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"model params: {n/1e6:.1f}M")
     return model
@@ -110,11 +109,19 @@ def run_epoch(model, loader, optimizer, cfg, device, train=True):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", default="config.yaml")
+    parser.add_argument("--policy", default="act",
+                        help="policy under policies/<name>/ (default: act)")
+    parser.add_argument("--config", default=None,
+                        help="config yaml (default: policies/<policy>/config.yaml)")
     args = parser.parse_args()
 
-    with open(args.config) as f:
+    config_path = Path(args.config) if args.config else \
+        REPO_ROOT / "policies" / args.policy / "config.yaml"
+    with open(config_path) as f:
         cfg = yaml.safe_load(f)
+
+    policy_mod = load_policy_module(args.policy)
+    print(f"policy: {args.policy}  config: {config_path}")
 
     torch.manual_seed(cfg["training"]["seed"])
     device = get_device(cfg)
@@ -122,7 +129,7 @@ def main():
 
     train_loader, val_loader, train_ds = build_loaders(cfg)
     stats = train_ds.get_stats()
-    model = build_model(cfg, stats, device)
+    model = build_model(policy_mod, cfg, stats, device)
 
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -155,6 +162,7 @@ def main():
         if epoch % save_n == 0 or is_best:
             ckpt = {
                 "epoch":          epoch,
+                "policy":         args.policy,
                 "model_state":    model.state_dict(),
                 "optimizer_state": optimizer.state_dict(),
                 "val_l1":         val_l1,

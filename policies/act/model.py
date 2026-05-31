@@ -161,3 +161,25 @@ class ACT(nn.Module):
             self._make_batch(obs_state, obs_image=obs_image)
         )
         return self._unnorm_action(action_norm)
+
+
+def build_model(cfg: dict, stats: dict, device) -> "ACT":
+    """Policy entry point used by common/train.py and common/deploy.py.
+    Builds an ACT model from the full config dict and dataset stats."""
+    m, d, t = cfg["model"], cfg["dataset"], cfg["training"]
+    model_cfg = ACTConfig(
+        state_dim=m["state_dim"],
+        action_dim=m["action_dim"],
+        latent_dim=m["latent_dim"],
+        d_model=m["d_model"],
+        nhead=m["nhead"],
+        num_encoder_layers=m["num_encoder_layers"],
+        num_decoder_layers=m["num_decoder_layers"],
+        dim_feedforward=m["dim_feedforward"],
+        dropout=m["dropout"],
+        chunk_size=d["chunk_size"],
+        use_image=d["use_image"],
+        kl_weight=t["kl_weight"],
+        temporal_ensemble_coeff=m.get("temporal_ensemble_coeff"),
+    )
+    return ACT(model_cfg, stats).to(device)

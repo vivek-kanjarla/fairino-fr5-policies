@@ -1,9 +1,10 @@
 # Real training run on the 2 converted episodes (5401 frames @ 30 Hz).
 # Smaller than the paper-scale config.yaml so it finishes on a laptop GPU/CPU.
 # This is a pipeline demonstration run, not a tuned policy (2 demos is tiny).
-#   cd training && python train.py --config config.local.yaml
+# Run from the repo root:
+#   python common/train.py --policy act --config policies/act/config.local.yaml
 dataset:
-  root: "../lerobot_dataset"
+  root: "lerobot_dataset"
   chunk_size: 100
   use_image: true
   image_size: [224, 224]
@@ -30,6 +31,6 @@ training:
   kl_weight: 10.0
   save_every: 1
   log_every: 50
-  checkpoint_dir: "./checkpoints"
+  checkpoint_dir: "policies/act/checkpoints"
   device: "auto"
   seed: 42

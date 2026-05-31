@@ -1,12 +1,16 @@
 """
-deploy.py — run a trained ACT policy on the FR5 robot.
+deploy.py — run a trained policy on the FR5 robot.
+
+The checkpoint records which policy produced it, so deploy auto-loads the
+matching policies/<policy>/model.py — no per-model deploy script needed.
 
 Usage:
-    python deploy.py --checkpoint ../training/checkpoints/best.pt
-    python deploy.py --checkpoint ../training/checkpoints/best.pt --steps 150 --no-image
+    python common/deploy.py --checkpoint policies/act/checkpoints/best.pt
+    python common/deploy.py --checkpoint policies/act/checkpoints/best.pt --steps 150 --no-image
 """
 
 import argparse
+import importlib.util
 import sys
 import time
 from pathlib import Path
@@ -18,16 +22,24 @@ from torchvision import transforms
 
 REPO_ROOT   = Path(__file__).resolve().parent.parent
 TELEOP_ROOT = REPO_ROOT.parent / "so101-fr5-teleop"
-sys.path.insert(0, str(REPO_ROOT / "training"))
 sys.path.insert(0, str(TELEOP_ROOT))
 
-from model import ACT, ACTConfig
 from fr5 import FR5Controller
 from config import (
     GRIPPER_INDEX, GRIPPER_TYPE,
     GRIPPER_OPEN_PCT, GRIPPER_CLOSE_PCT,
     GRIPPER_VEL_PCT, GRIPPER_FORCE_PCT, GRIPPER_MAXTIME_MS,
 )
+
+
+def _load_policy_module(policy: str):
+    path = REPO_ROOT / "policies" / policy / "model.py"
+    if not path.exists():
+        raise SystemExit(f"unknown policy '{policy}': {path} not found")
+    spec = importlib.util.spec_from_file_location(f"policy_{policy}", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
 
 POLICY_HZ           = 30
@@ -44,33 +56,17 @@ _IMG_TRANSFORM = transforms.Compose([
 
 # ── model ─────────────────────────────────────────────────────────────────────
 
-def load_policy(ckpt_path: str, device: torch.device) -> tuple[ACT, dict]:
+def load_policy(ckpt_path: str, device: torch.device):
     ckpt     = torch.load(ckpt_path, map_location=device, weights_only=False)
     cfg_dict = ckpt["config"]
-    stats    = ckpt["stats"]
-    m, d, t  = cfg_dict["model"], cfg_dict["dataset"], cfg_dict["training"]
+    policy   = ckpt.get("policy", "act")
 
-    model_cfg = ACTConfig(
-        state_dim=m["state_dim"],
-        action_dim=m["action_dim"],
-        latent_dim=m["latent_dim"],
-        d_model=m["d_model"],
-        nhead=m["nhead"],
-        num_encoder_layers=m["num_encoder_layers"],
-        num_decoder_layers=m["num_decoder_layers"],
-        dim_feedforward=m["dim_feedforward"],
-        dropout=m["dropout"],
-        chunk_size=d["chunk_size"],
-        use_image=d["use_image"],
-        kl_weight=t["kl_weight"],
-        temporal_ensemble_coeff=m.get("temporal_ensemble_coeff"),
-    )
-
-    model = ACT(model_cfg, stats).to(device)
+    policy_mod = _load_policy_module(policy)
+    model = policy_mod.build_model(cfg_dict, ckpt["stats"], device)
     model.load_state_dict(ckpt["model_state"])
     model.eval()
 
-    print(f"loaded checkpoint  epoch={ckpt['epoch']}  val_l1={ckpt['val_l1']:.4f}")
+    print(f"loaded {policy} checkpoint  epoch={ckpt['epoch']}  val_l1={ckpt['val_l1']:.4f}")
     return model, cfg_dict
 
 

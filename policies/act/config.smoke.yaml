@@ -1,10 +1,10 @@
 # Tiny config for SMOKE-TESTING the pipeline end-to-end (not for real training).
 # Points at the self-contained dataset built by:
-#   python tools/convert_episodes.py --out _smoke_dataset --extract-frames --max-frames 60
-# Run from the training/ dir:
-#   python train.py --config config.smoke.yaml
+#   python common/convert_episodes.py --out _smoke_dataset --extract-frames --max-frames 60
+# Run from the repo root:
+#   python common/train.py --policy act --config policies/act/config.smoke.yaml
 dataset:
-  root: "../_smoke_dataset"
+  root: "_smoke_dataset"
   chunk_size: 20
   use_image: true
   image_size: [224, 224]
@@ -31,6 +31,6 @@ training:
   kl_weight: 10.0
   save_every: 1
   log_every: 5
-  checkpoint_dir: "./checkpoints_smoke"
+  checkpoint_dir: "policies/act/checkpoints_smoke"
   device: "cpu"
   seed: 42

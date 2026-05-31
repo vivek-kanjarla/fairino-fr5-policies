@@ -7,14 +7,15 @@ seconds with a tiny model.
 
 Stages:
   1. convert raw episodes -> LeRobot dataset (_smoke_dataset)
-  2. load via training/dataset.py and check tensor shapes
-  3. [needs lerobot] build the ACT model, run one fwd/bwd step,
-     save a checkpoint, reload it (deploy-style) and call predict()
+  2. load via common/dataset.py and check tensor shapes
+  3. [needs lerobot] build the policy via policies/<policy>/build_model, run one
+     fwd/bwd step, save a checkpoint, reload it (deploy-style) and call predict()
 
 If lerobot isn't installed, stages 1-2 still run and stage 3 is reported as
 SKIPPED with the reason.
 
-    python tools/smoke_test.py
+    python common/smoke_test.py            # defaults to the act policy
+    python common/smoke_test.py diffusion  # once policies/diffusion/ exists
 """
 
 import subprocess
@@ -25,12 +26,14 @@ import torch
 
 REPO = Path(__file__).resolve().parent.parent
 SMOKE_DS = REPO / "_smoke_dataset"
-sys.path.insert(0, str(REPO / "training"))
+POLICY = sys.argv[1] if len(sys.argv) > 1 else "act"
+sys.path.insert(0, str(REPO / "common"))
+sys.path.insert(0, str(REPO / "policies" / POLICY))
 
 
 def stage1_convert():
     print("\n[1/3] convert raw episodes -> LeRobot dataset")
-    cmd = [sys.executable, str(REPO / "tools" / "convert_episodes.py"),
+    cmd = [sys.executable, str(REPO / "common" / "convert_episodes.py"),
            "--episodes", str(REPO / "episodes"),
            "--out", str(SMOKE_DS),
            "--extract-frames", "--max-frames", "60"]
@@ -58,26 +61,29 @@ def stage2_dataset():
 
 
 def stage3_model(stats):
-    print("\n[3/3] build model, train step, checkpoint, reload, predict")
+    print(f"\n[3/3] build '{POLICY}' policy, train step, checkpoint, reload, predict")
+    import yaml
     try:
-        from model import ACT, ACTConfig
+        import model as policy_mod  # policies/<POLICY>/model.py
     except Exception as e:  # lerobot missing or API mismatch
-        print(f"      SKIPPED — could not import model.py ({type(e).__name__}: {e})")
+        print(f"      SKIPPED — could not import policies/{POLICY}/model.py "
+              f"({type(e).__name__}: {e})")
         print("      install the policy backend to run this stage:  pip install lerobot")
         return False
 
-    cfg = ACTConfig(state_dim=6, action_dim=7, latent_dim=8, d_model=64, nhead=4,
-                    num_encoder_layers=1, num_decoder_layers=1, dim_feedforward=128,
-                    chunk_size=20, use_image=True, kl_weight=10.0,
-                    temporal_ensemble_coeff=None)
+    with open(REPO / "policies" / POLICY / "config.smoke.yaml") as f:
+        cfg = yaml.safe_load(f)
+    chunk = cfg["dataset"]["chunk_size"]
+    adim = cfg["model"]["action_dim"]
+    sdim = cfg["model"]["state_dim"]
     device = torch.device("cpu")
-    model = ACT(cfg, stats).to(device)
+    model = policy_mod.build_model(cfg, stats, device)
 
     # one fwd/bwd step on a dummy batch
     B = 2
-    obs = torch.randn(B, 6)
-    acts = torch.randn(B, 20, 7)
-    pad = torch.zeros(B, 20, dtype=torch.bool)
+    obs = torch.randn(B, sdim)
+    acts = torch.randn(B, chunk, adim)
+    pad = torch.zeros(B, chunk, dtype=torch.bool)
     img = torch.rand(B, 3, 224, 224)
     opt = torch.optim.AdamW(model.parameters(), lr=1e-4)
     model.train()
@@ -88,15 +94,16 @@ def stage3_model(stats):
 
     # checkpoint round-trip (mirrors train.py / deploy.py)
     ckpt = SMOKE_DS / "smoke_ckpt.pt"
-    torch.save({"epoch": 1, "model_state": model.state_dict(),
-                "val_l1": l1, "stats": stats}, ckpt)
-    model2 = ACT(cfg, stats).to(device)
-    model2.load_state_dict(torch.load(ckpt, weights_only=False)["model_state"])
+    torch.save({"epoch": 1, "policy": POLICY, "model_state": model.state_dict(),
+                "val_l1": l1, "config": cfg, "stats": stats}, ckpt)
+    saved = torch.load(ckpt, weights_only=False)
+    model2 = policy_mod.build_model(saved["config"], saved["stats"], device)
+    model2.load_state_dict(saved["model_state"])
     model2.eval()
     model2.reset()
     out = model2.predict(obs[:1], img[:1])
     out = out[0] if out.dim() == 2 else out
-    assert out.shape[-1] == 7, out.shape
+    assert out.shape[-1] == adim, out.shape
     print(f"      checkpoint reload + predict OK  action={tuple(out.shape)}")
     return True
 
@@ -106,7 +113,7 @@ def main():
     stats = stage2_dataset()
     model_ok = stage3_model(stats)
     print("\n" + "=" * 60)
-    print("SMOKE TEST: data pipeline PASSED" +
+    print(f"SMOKE TEST [{POLICY}]: data pipeline PASSED" +
           ("  |  model+train+deploy PASSED" if model_ok
            else "  |  model stage SKIPPED (lerobot not installed)"))
     print("=" * 60)

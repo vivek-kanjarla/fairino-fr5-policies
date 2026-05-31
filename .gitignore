@@ -16,8 +16,8 @@ _smoke_dataset/
 lerobot_dataset/
 
 # ── training artifacts ──────────────────────────────────
-training/checkpoints/
-training/checkpoints_smoke/
+policies/*/checkpoints/
+policies/*/checkpoints_smoke/
 checkpoints/
 checkpoints_smoke/
 *.pt

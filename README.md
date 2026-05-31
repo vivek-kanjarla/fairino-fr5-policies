@@ -1,27 +1,26 @@
 # fairino-fr5-policies
 
-Imitation-learning training and inference pipeline for the Fairino FR5 cobot,
-using data collected from the SO-101 → FR5 teleoperation setup.
+Training and deploying imitation learning policies on the Fairino FR5 cobot. Data comes from teleoperation via an SO-101 leader arm, and the goal is to get the FR5 to autonomously replicate tasks like pick-and-place at 30 Hz.
 
-A **shared** data + training + deploy harness lives in `common/`; each policy
-type (ACT, and future ones like Diffusion Policy, VQ-BeT, …) is a self-contained
-folder under `policies/<name>/`. Training and deploy pick the policy by name, so
-adding a model never touches the shared code.
+This repo is set up as a centralised policy hub — one shared training/data pipeline in `common/`, and each policy type gets its own folder under `policies/`. So you can swap between ACT, Diffusion Policy, DiT etc. without touching any shared code.
 
 ---
 
-## What this does
+## what's in here
 
-Takes the LeRobot v3.0 dataset recorded by [so101-fr5-teleop](../so101-fr5-teleop)
-(or built locally from raw episodes, see below) and trains a policy on it. The
-trained policy runs closed-loop on the real FR5 at 30 Hz.
+| policy | folder | what it is |
+|---|---|---|
+| ACT | `policies/act/` | Action Chunking Transformer — CVAE + transformer, predicts 100-step chunks |
+| Diffusion Policy | `policies/diffusion/` | DDPM with a 1-D U-Net denoiser, 10-step DDIM at inference |
+| DiT + Flow Matching | `policies/dit_flow/` | Diffusion Transformer with flow matching objective, CLIP vision + language |
+
+all three are wrapped around lerobot 0.5.1 and trained on the same FR5 episodes.
 
 ---
 
-## Setup
+## setup
 
-`lerobot==0.5.1` pins `torch`/`torchvision`/`numpy` below the newest releases, so
-install into a fresh venv rather than a bleeding-edge system Python:
+lerobot pins torch/torchvision below the newest releases so you need a venv:
 
 ```bash
 python3.12 -m venv .venv
@@ -29,93 +28,93 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-All commands below are run **from the repo root**.
+run everything from the repo root.
 
 ---
 
-## Usage
+## getting data ready
 
-**1. Convert raw episodes → LeRobot dataset**
-
-Raw recordings live in `episodes/episode_*/` (`data.csv` at ~100 Hz + `wrist_cam.mp4`
-at ~30 Hz + `meta.json`). The converter resamples the CSV onto the camera timestamps
-(one row per video frame), maps columns to `observation.state` (6 actual joints),
-`action` (6 cmd joints + gripper), and `observation.eef_pose`, and writes a LeRobot
-v3.0 dataset. `--extract-frames` dumps aligned JPEGs so training I/O is fast.
+raw recordings live in `episodes/episode_*/` — a ~100 Hz CSV log, a ~30 Hz wrist cam video, and a meta.json per episode. the converter resamples the CSV down to the camera rate (one row per frame) and outputs a LeRobot v3.0 dataset:
 
 ```bash
 python common/convert_episodes.py --episodes episodes --out lerobot_dataset --extract-frames
 ```
 
-Point `dataset.root` in the policy's config at the output dir.
+`--extract-frames` pre-extracts JPEGs so training I/O is fast instead of seeking the video every step.
 
-**2. EDA** — `eda/eda.ipynb` explores the converted dataset before training.
+then update `dataset.root` in whatever config you're using to point at the output folder.
 
-**3. Train**
+---
 
-```bash
-python common/train.py --policy act --config policies/act/config.local.yaml   # laptop-friendly
-# policies/act/config.yaml is the larger paper-scale setup
-```
-
-Checkpoints land in `policies/<policy>/checkpoints/`; `best.pt` is saved whenever
-val L1 improves. The checkpoint records which policy produced it.
-
-**Smoke test** — verify the whole pipeline (convert → load → train step → checkpoint
-→ predict) in a few seconds on CPU:
+## training
 
 ```bash
-python common/smoke_test.py          # defaults to act
+# ACT
+python common/train.py --policy act --config policies/act/config.local.yaml
+
+# Diffusion Policy
+python common/train.py --policy diffusion --config policies/diffusion/config.local.yaml
+
+# DiT + flow matching
+python common/train.py --policy dit_flow --config policies/dit_flow/config.local.yaml
 ```
 
-**4. Deploy on the robot**
+checkpoints go to `policies/<policy>/checkpoints/`. `best.pt` updates whenever val L1 improves. each checkpoint stores which policy it came from, so deploy just reads that and loads the right model automatically.
+
+there's also a quick smoke test that runs convert → dataset → train step → checkpoint → predict in a few seconds:
+
+```bash
+python common/smoke_test.py act
+python common/smoke_test.py diffusion
+python common/smoke_test.py dit_flow
+```
+
+---
+
+## deploying on the robot
 
 ```bash
 python common/deploy.py --checkpoint policies/act/checkpoints/best.pt
 ```
 
-`deploy.py` reads the policy name from the checkpoint and auto-loads the matching
-`policies/<policy>/model.py`. Runs 150 steps (5 s) by default; change with `--steps N`.
-If the model was trained with images but the camera isn't plugged in, use `--no-image`.
+runs at 30 Hz for 150 steps by default. use `--steps N` to change that. if the model was trained with images but the camera isn't connected, `--no-image` falls back to state-only.
 
 ---
 
-## Repo layout
+## adding a new policy
+
+drop a folder under `policies/<name>/` with:
+- `model.py` — implements `build_model(cfg, stats, device)` returning a model with `forward(obs, actions, pad, image, task) -> (loss, l1, kl)`, `reset()`, and `predict(obs, image, task)`
+- `config.yaml`, `config.local.yaml`, `config.smoke.yaml`
+
+that's it. `common/train.py --policy <name>` picks it up automatically.
+
+---
+
+## repo layout
 
 ```
-common/                 shared across all policies
-  convert_episodes.py   raw episodes → LeRobot v3.0 dataset (100→30 Hz resample)
-  dataset.py            LeRobot parquet → PyTorch DataLoader
-  train.py              policy-agnostic training loop (--policy <name>)
-  deploy.py             loads any checkpoint, runs it on the FR5
-  smoke_test.py         end-to-end pipeline check
+common/
+  convert_episodes.py    raw episodes → LeRobot dataset
+  dataset.py             parquet + video → PyTorch DataLoader
+  train.py               shared training loop (--policy <name>)
+  deploy.py              load any checkpoint, run on the FR5
+  smoke_test.py          quick end-to-end sanity check
 policies/
-  act/                  ACT (Action Chunking Transformer), lerobot ACTPolicy wrapper
-    model.py            defines build_model(cfg, stats, device)
-    config.yaml         paper-scale hyperparameters
-    config.local.yaml   small laptop run
-    config.smoke.yaml   tiny CPU smoke config
+  act/                   ACT wrapper + configs
+  diffusion/             Diffusion Policy wrapper + configs
+  dit_flow/              DiT + flow matching wrapper + configs
 eda/
-  eda.ipynb             dataset exploration
+  eda.ipynb              explore the dataset before training
 ```
-
-### Adding a new policy
-
-1. `mkdir policies/<name>` with a `model.py` that defines
-   `build_model(cfg, stats, device) -> nn.Module`, where the returned model
-   implements `forward(obs_state, actions, action_is_pad, obs_image) -> (loss, l1, kl)`,
-   `reset()`, and `predict(obs_state, obs_image)`.
-2. Add a `config.yaml` (same `dataset` / `model` / `training` sections).
-3. Train with `python common/train.py --policy <name>`. No shared code changes.
 
 ---
 
-## Key numbers (ACT)
+## hardware
 
-| | |
-|---|---|
-| Action dim | 7 (joints 1–6 in deg + gripper 0–1) |
-| Obs dim | 6 (actual joint positions in deg) |
-| Control frequency | 30 Hz |
-| Action chunk size | 100 steps (~3.3 s) |
-| Image | 640×480 wrist cam, resized to 224×224 |
+- **Robot**: Fairino FR5 (6-DOF cobot)
+- **Leader arm**: SO-101 for teleoperation
+- **Camera**: Intel RealSense D405 (wrist-mounted), 640×480 → resized to 224×224
+- **Control rate**: 30 Hz
+- **Action space**: 6 joint angles (deg) + gripper (0–1 normalised)
+- **State space**: 6 actual joint positions (deg)

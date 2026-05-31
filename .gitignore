@@ -30,3 +30,4 @@ checkpoints_smoke/
 # local planning notes (keep out of the repo)
 NEXT_MODELS.md
 AUGMENTATION.md
+CONTROL_FREQUENCIES.md

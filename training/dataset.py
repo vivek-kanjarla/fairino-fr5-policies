@@ -92,21 +92,33 @@ class FR5Dataset(Dataset):
         return sample
 
     def _load_frame(self, ep_idx, frame_idx):
-        vid = self.root / "videos" / VIDEO_KEY / "chunk-000" / f"file-{ep_idx:03d}.mp4"
-        if not vid.exists():
-            return None
+        # Fast path: pre-extracted JPEG (see tools/convert_episodes.py --extract-frames).
+        # Avoids reopening + seeking the video on every __getitem__, which is the
+        # dominant cost during training.
+        jpg = (self.root / "frames" / VIDEO_KEY /
+               f"ep-{ep_idx:03d}" / f"{frame_idx:06d}.jpg")
+        if jpg.exists():
+            frame = cv2.imread(str(jpg))  # BGR
+        else:
+            frame = self._read_video_frame(ep_idx, frame_idx)
 
-        cap = cv2.VideoCapture(str(vid))
-        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-        ret, frame = cap.read()
-        cap.release()
-
-        if not ret:
+        if frame is None:
             return None
 
         frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         img = torch.from_numpy(frame).permute(2, 0, 1).float() / 255.0
         return self._img_transform(img)
+
+    def _read_video_frame(self, ep_idx, frame_idx):
+        """Fallback: seek the episode video (slow; used when frames aren't extracted)."""
+        vid = self.root / "videos" / VIDEO_KEY / "chunk-000" / f"file-{ep_idx:03d}.mp4"
+        if not vid.exists():
+            return None
+        cap = cv2.VideoCapture(str(vid))
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+        ret, frame = cap.read()
+        cap.release()
+        return frame if ret else None
 
     def get_stats(self):
         ep_mask = self.df["episode_index"].isin(

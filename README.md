@@ -12,29 +12,51 @@ Takes the LeRobot v3.0 dataset recorded by [so101-fr5-teleop](../so101-fr5-teleo
 
 ## Setup
 
+`lerobot==0.5.1` pins `torch`/`torchvision`/`numpy` below the newest releases, so
+install into a fresh venv rather than a bleeding-edge system Python:
+
 ```bash
+python3.12 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 ```
-
-Dataset should already be at `../so101-fr5-teleop/lerobot_dataset/` from the teleop repo. If it's somewhere else, update `dataset.root` in `training/config.yaml`.
 
 ---
 
 ## Usage
 
-**1. EDA** — EDA of the dataset before training
+**1. Convert raw episodes → LeRobot dataset**
 
+Raw recordings live in `episodes/episode_*/` (`data.csv` at ~100 Hz + `wrist_cam.mp4`
+at ~30 Hz + `meta.json`). The converter resamples the CSV onto the camera timestamps
+(one row per video frame), maps columns to `observation.state` (6 actual joints),
+`action` (6 cmd joints + gripper), and `observation.eef_pose`, and writes a LeRobot
+v3.0 dataset. `--extract-frames` dumps aligned JPEGs so training I/O is fast.
 
-**2. Train**
+```bash
+python tools/convert_episodes.py --episodes episodes --out lerobot_dataset --extract-frames
+```
+
+Point `dataset.root` in your training config at the output dir.
+
+**2. EDA** — `eda/eda.ipynb` explores the converted dataset before training.
+
+**3. Train**
 
 ```bash
 cd training
-python train.py
-# or with a different config
-python train.py --config config.yaml
+python train.py --config config.local.yaml   # small, laptop-friendly run
+# config.yaml is the larger paper-scale setup
 ```
 
 Checkpoints land in `training/checkpoints/`. `best.pt` is saved whenever val L1 improves.
+
+**Smoke test** — verify the whole pipeline (convert → load → train step → checkpoint
+→ predict) in a few seconds on CPU:
+
+```bash
+python tools/smoke_test.py
+```
 
 **3. Deploy on the robot**
 

@@ -73,12 +73,13 @@ def build_model(cfg, stats, device):
 
 def run_epoch(model, loader, optimizer, cfg, device, train=True):
     model.train(train)
-    kl_w = cfg["training"]["kl_weight"]
     clip  = cfg["training"]["grad_clip"]
     log_n = cfg["training"]["log_every"]
 
     total_l1 = total_kl = 0.0
 
+    # lerobot's ACTPolicy.forward already folds kl_weight into `loss`, so we
+    # backprop it directly; l1 / kl come back as floats for logging only.
     ctx = torch.enable_grad() if train else torch.no_grad()
     with ctx:
         for step, batch in enumerate(loader):
@@ -89,8 +90,7 @@ def run_epoch(model, loader, optimizer, cfg, device, train=True):
             if img is not None:
                 img = img.to(device)
 
-            l1, kl = model(obs, acts, pad, img)
-            loss   = l1 + kl_w * kl
+            loss, l1, kl = model(obs, acts, pad, img)
 
             if train:
                 optimizer.zero_grad()
@@ -98,12 +98,12 @@ def run_epoch(model, loader, optimizer, cfg, device, train=True):
                 nn.utils.clip_grad_norm_(model.parameters(), clip)
                 optimizer.step()
 
-            total_l1 += l1.item()
-            total_kl  += kl.item()
+            total_l1 += l1
+            total_kl += kl
 
             if train and (step + 1) % log_n == 0:
                 print(f"    step {step+1}/{len(loader)}  "
-                      f"l1={l1.item():.4f}  kl={kl.item():.4f}")
+                      f"l1={l1:.4f}  kl={kl:.4f}")
 
     return total_l1 / len(loader), total_kl / len(loader)
 

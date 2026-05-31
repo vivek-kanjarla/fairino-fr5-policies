@@ -1,0 +1,28 @@
+# ── Python ──────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ipynb_checkpoints/
+
+# ── virtual envs ────────────────────────────────────────
+.venv/
+venv/
+env/
+
+# ── recorded data (raw episodes + converted datasets) ───
+episodes/
+_smoke_dataset/
+*/lerobot_dataset/
+lerobot_dataset/
+
+# ── training artifacts ──────────────────────────────────
+training/checkpoints/
+training/checkpoints_smoke/
+checkpoints/
+checkpoints_smoke/
+*.pt
+*.ckpt
+
+# ── misc ────────────────────────────────────────────────
+.DS_Store
+*.log

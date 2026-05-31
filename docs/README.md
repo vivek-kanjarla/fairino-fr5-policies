@@ -2,6 +2,10 @@
 
 plain-English deep dives on each policy in this repo — what it is, how it works, the math, and how it differs from the others. read in this order; each builds on the last.
 
+> **want to learn by coding?** [`exercises/`](exercises/) has from-scratch PyTorch exercises
+> (attention, CVAE, DDPM/DDIM, flow matching, DiT/AdaLN, FAST tokenization, temporal ensembling)
+> with stubs + self-checks + tested solutions. run `python docs/exercises/check_all.py`.
+
 | # | doc | model | one-liner |
 |---|---|---|---|
 | 1 | [act.md](act.md) | **ACT** | transformer directly predicts a 100-step action chunk; CVAE captures demo variability |

@@ -42,6 +42,8 @@ def build_loaders(cfg):
     d = cfg["dataset"]
     t = cfg["training"]
 
+    aug = d.get("aug_level", "none")
+
     # split by episode index to avoid leakage
     tmp = FR5Dataset(d["root"], chunk_size=d["chunk_size"],
                      use_image=d["use_image"], image_size=tuple(d["image_size"]))
@@ -49,9 +51,11 @@ def build_loaders(cfg):
     train_eps, val_eps = FR5Dataset.episode_split(n_total, d["val_frac"], t["seed"])
 
     train_ds = FR5Dataset(d["root"], d["chunk_size"], d["use_image"],
-                          tuple(d["image_size"]), episode_indices=train_eps)
+                          tuple(d["image_size"]), episode_indices=train_eps,
+                          aug_level=aug)
     val_ds   = FR5Dataset(d["root"], d["chunk_size"], d["use_image"],
-                          tuple(d["image_size"]), episode_indices=val_eps)
+                          tuple(d["image_size"]), episode_indices=val_eps,
+                          aug_level="none")   # never augment val
 
     train_loader = DataLoader(train_ds, batch_size=t["batch_size"], shuffle=True,
                               num_workers=2, pin_memory=True, drop_last=True)

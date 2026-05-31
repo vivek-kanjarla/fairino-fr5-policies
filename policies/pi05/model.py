@@ -129,14 +129,12 @@ class Pi05(nn.Module):
         return enc["input_ids"].to(device), enc["attention_mask"].to(device)
 
     def _make_batch(self, obs_state, actions=None, action_is_pad=None,
-                    obs_image=None, task=None, for_training=True):
+                    obs_image=None, task=None):
+        # State: always (B, state_dim) — pi05 adds seq dim internally in embed_suffix.
         dev  = obs_state.device
         B    = obs_state.shape[0]
         task = task or [""] * B
-        state = self._norm_state(obs_state)
-        if for_training:
-            state = state.unsqueeze(1)
-        batch = {STATE_KEY: state}
+        batch = {STATE_KEY: self._norm_state(obs_state)}
         if self.cfg.use_image and obs_image is not None:
             batch[IMAGE_KEY] = self._to_raw(obs_image)
         ids, mask = self._tokenize(task, dev)
@@ -148,9 +146,9 @@ class Pi05(nn.Module):
         return batch
 
     def forward(self, obs_state, actions, action_is_pad, obs_image=None, task=None):
-        batch = self._make_batch(obs_state, actions, action_is_pad, obs_image, task,
-                                 for_training=True)
-        loss, _ = self.policy.forward(batch)
+        loss, _ = self.policy.forward(
+            self._make_batch(obs_state, actions, action_is_pad, obs_image, task)
+        )
         return loss, loss.item(), 0.0
 
     def reset(self):
@@ -159,7 +157,7 @@ class Pi05(nn.Module):
     @torch.no_grad()
     def predict(self, obs_state, obs_image=None, task=None):
         action_norm = self.policy.select_action(
-            self._make_batch(obs_state, obs_image=obs_image, task=task, for_training=False)
+            self._make_batch(obs_state, obs_image=obs_image, task=task)
         )
         return self._unnorm_action(action_norm)
 

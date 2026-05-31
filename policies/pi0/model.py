@@ -150,18 +150,25 @@ class Pi0(nn.Module):
         return enc["input_ids"].to(device), enc["attention_mask"].to(device)
 
     def _make_batch(self, obs_state, actions=None, action_is_pad=None,
-                    obs_image=None, task=None, for_training=True):
+                    obs_image=None, task=None):
+        """Build batch for PI0Policy.
+
+        State shape: always (B, state_dim) — NO n_obs_steps unsqueeze.
+        PI0Pytorch.embed_suffix calls state_proj(state) expecting (B, max_state_dim)
+        then adds the sequence dim itself via state_emb[:, None, :]. Adding unsqueeze
+        here would give (B, 1, max_state_dim) → state_emb[:, None, :] → (B,1,1,width).
+
+        Images: (B, C, H, W) in [0,1]; _preprocess_images converts to [-1,1].
+        Actions: (B, chunk_size, action_dim); prepare_action pads to max_action_dim.
+        """
         dev  = obs_state.device
         B    = obs_state.shape[0]
         task = task or [""] * B
 
-        state = self._norm_state(obs_state)
-        if for_training:
-            state = state.unsqueeze(1)   # (B, 1, state_dim) for forward()
-        batch = {STATE_KEY: state}
+        batch = {STATE_KEY: self._norm_state(obs_state)}   # (B, state_dim)
 
         if self.cfg.use_image and obs_image is not None:
-            batch[IMAGE_KEY] = self._to_raw(obs_image)   # (B, C, H, W), [0,1]
+            batch[IMAGE_KEY] = self._to_raw(obs_image)     # (B, C, H, W) in [0,1]
 
         ids, mask = self._tokenize(task, dev)
         batch[LANG_TOKENS]    = ids
@@ -175,9 +182,9 @@ class Pi0(nn.Module):
 
     def forward(self, obs_state, actions, action_is_pad, obs_image=None, task=None):
         """Returns (loss, loss_item, 0.0) — flow-matching MSE, no KL."""
-        batch = self._make_batch(obs_state, actions, action_is_pad, obs_image, task,
-                                 for_training=True)
-        loss, _ = self.policy.forward(batch)
+        loss, _ = self.policy.forward(
+            self._make_batch(obs_state, actions, action_is_pad, obs_image, task)
+        )
         return loss, loss.item(), 0.0
 
     def reset(self):
@@ -186,7 +193,7 @@ class Pi0(nn.Module):
     @torch.no_grad()
     def predict(self, obs_state, obs_image=None, task=None):
         action_norm = self.policy.select_action(
-            self._make_batch(obs_state, obs_image=obs_image, task=task, for_training=False)
+            self._make_batch(obs_state, obs_image=obs_image, task=task)
         )
         return self._unnorm_action(action_norm)
 

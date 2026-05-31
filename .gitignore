@@ -26,3 +26,6 @@ checkpoints_smoke/
 # ── misc ────────────────────────────────────────────────
 .DS_Store
 *.log
+
+# local planning notes (keep out of the repo)
+NEXT_MODELS.md

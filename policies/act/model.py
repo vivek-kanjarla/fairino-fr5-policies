@@ -130,7 +130,7 @@ class ACT(nn.Module):
             batch["action_is_pad"] = action_is_pad
         return batch
 
-    def forward(self, obs_state, actions, action_is_pad, obs_image=None):
+    def forward(self, obs_state, actions, action_is_pad, obs_image=None, task=None):
         """Returns (loss, l1_item, kl_item). `loss` is differentiable and already
         includes kl_weight; l1_item / kl_item are floats for logging.
 
@@ -156,7 +156,7 @@ class ACT(nn.Module):
         self.policy.reset()
 
     @torch.no_grad()
-    def predict(self, obs_state, obs_image=None):
+    def predict(self, obs_state, obs_image=None, task=None):
         action_norm = self.policy.select_action(
             self._make_batch(obs_state, obs_image=obs_image)
         )

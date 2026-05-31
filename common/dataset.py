@@ -39,6 +39,15 @@ class FR5Dataset(Dataset):
 
         self._samples = self._build_index()
 
+        # task index → language string (used by language-conditioned policies like DiT)
+        tasks_path = self.root / "meta" / "tasks.parquet"
+        if tasks_path.exists():
+            tasks_df = pq.read_table(tasks_path).to_pandas()
+            self._task_map = dict(zip(tasks_df["task_index"].tolist(),
+                                      tasks_df["task"].tolist()))
+        else:
+            self._task_map = {}
+
         self._img_transform = transforms.Compose([
             transforms.Resize(image_size),
             transforms.Normalize(mean=[0.485, 0.456, 0.406],
@@ -77,10 +86,12 @@ class FR5Dataset(Dataset):
             actions = torch.cat([actions, padding], dim=0)
             is_pad[self.chunk_size - pad_len:] = True
 
+        task_idx = int(row["task_index"]) if "task_index" in row.index else 0
         sample = {
             "observation.state": state,
             "action":            actions,
             "action_is_pad":     is_pad,
+            "task":              self._task_map.get(task_idx, ""),
         }
 
         if self.use_image:
@@ -130,8 +141,12 @@ class FR5Dataset(Dataset):
         return {
             "state_mean":  state.mean(0).astype(np.float32),
             "state_std":   state.std(0).clip(1e-6).astype(np.float32),
+            "state_min":   state.min(0).astype(np.float32),
+            "state_max":   state.max(0).astype(np.float32),
             "action_mean": action.mean(0).astype(np.float32),
             "action_std":  action.std(0).clip(1e-6).astype(np.float32),
+            "action_min":  action.min(0).astype(np.float32),
+            "action_max":  action.max(0).astype(np.float32),
         }
 
     @staticmethod

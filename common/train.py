@@ -88,8 +88,9 @@ def run_epoch(model, loader, optimizer, cfg, device, train=True):
             img   = batch.get("observation.image")
             if img is not None:
                 img = img.to(device)
+            task  = batch.get("task")  # list[str] or None; used by language-conditioned policies
 
-            loss, l1, kl = model(obs, acts, pad, img)
+            loss, l1, kl = model(obs, acts, pad, img, task=task)
 
             if train:
                 optimizer.zero_grad()

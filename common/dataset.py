@@ -296,8 +296,12 @@ class FR5Dataset(Dataset):
             if self.n_obs_steps == 1:
                 frame_in_ep = int(row["frame_index"])
                 img = self._load_frame(ep_idx, frame_in_ep, aug_seed)
-                if img is not None:
-                    sample["observation.image"] = img
+                if img is None:
+                    # keep the batch collatable if a single frame is unreadable —
+                    # fall back to a black frame (rare; pre-extracted frames are reliable)
+                    print(f"[dataset] WARN: missing frame ep{ep_idx} idx{frame_in_ep}, using zeros")
+                    img = torch.zeros(3, *self.image_size)
+                sample["observation.image"] = img
             else:
                 # Industry standard (UMI, Columbia DP, robomimic): independent
                 # augmentation per frame. Each frame gets its own seed so crop

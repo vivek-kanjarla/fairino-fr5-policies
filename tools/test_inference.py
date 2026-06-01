@@ -52,7 +52,6 @@ def _run_rollout(model, device, steps=N_STEPS, task=None):
     model.reset()
     actions = []
     times   = []
-    model_calls = 0   # track how often the underlying model is actually queried
 
     for i in range(steps):
         obs, img = _dummy_obs(device)

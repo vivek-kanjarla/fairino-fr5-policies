@@ -148,6 +148,13 @@ def run(args):
     model, cfg_dict = load_policy(args.checkpoint, device)
     use_image = cfg_dict["dataset"]["use_image"] and not args.no_image
 
+    # Language-conditioned policies (dit_flow, pi0, pi05, pi0_fast) need the task
+    # instruction at inference, matching what they were trained on. ACT / Diffusion
+    # ignore it. Passed as a batch of one string to model.predict().
+    task = [args.task] if args.task else None
+    if task:
+        print(f"task: {args.task!r}")
+
     camera  = None
     gripper = None
 
@@ -197,7 +204,7 @@ def run(args):
                         last_img = img
 
                 # ── policy ───────────────────────────────────────────────────
-                action = model.predict(obs, img)                    # (action_dim,) or (1, action_dim)
+                action = model.predict(obs, img, task=task)         # (action_dim,) or (1, action_dim)
                 if action.dim() == 2:
                     action = action[0]
                 action = action.cpu().numpy()
@@ -240,6 +247,9 @@ def main():
                         help="number of policy steps to run (default 150 = 5s at 30 Hz)")
     parser.add_argument("--no-image",   action="store_true",
                         help="ignore camera even if checkpoint was trained with images")
+    parser.add_argument("--task", default="pick up the block and place it in the bin",
+                        help="language instruction for language-conditioned policies "
+                             "(dit_flow / pi0 / pi05 / pi0_fast); ignored by ACT / Diffusion")
     run(parser.parse_args())
 
 

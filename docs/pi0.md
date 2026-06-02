@@ -260,6 +260,8 @@ actions into tokens (that is what π0-FAST does — see section 13), but π0's m
 instead generates the continuous action chunk with **flow matching**, attached via a second
 network. That second network is the action expert.
 
+![π0 architecture: PaliGemma VLM prefix + action expert + Euler ODE](imgs/pi0_architecture.png)
+
 ---
 
 ## 4. The two-expert architecture

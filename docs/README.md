@@ -20,6 +20,34 @@ plain-English deep dives on each policy in this repo — what it is, how it work
 
 ---
 
+## data & inference pipeline
+
+```mermaid
+flowchart LR
+    subgraph Record
+        A[Human Teleoperation\n100 Hz CSV + 30 fps video]
+    end
+    subgraph Convert
+        B[convert_episodes.py\nresample → LeRobot v3 dataset]
+    end
+    subgraph Train
+        C[FR5Dataset\naugmentation + chunking]
+        D{policy}
+        D -->|ACT| E[CVAE + Transformer]
+        D -->|Diffusion| F[U-Net DDIM]
+        D -->|DiT+Flow| G[DiT Euler ODE]
+        D -->|π0 family| H[PaliGemma VLA]
+    end
+    subgraph Deploy
+        I[deploy.py\n30 Hz control loop]
+        J[FR5 Robot]
+    end
+    A --> B --> C --> D
+    E & F & G & H --> I --> J
+```
+
+---
+
 ## the big picture — two families
 
 ```

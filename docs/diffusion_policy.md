@@ -253,6 +253,8 @@ ASCII picture of the forward process at three noise levels
  k = 99   a_k ≈ 0.03·a₀ + 1.00·ε      ▇▅▇▆▇  (pure static)
 ```
 
+![Forward diffusion: clean action → pure noise across noise levels](imgs/diffusion_forward_process.png)
+
 ---
 
 ## 6. The variance / beta schedule
@@ -281,6 +283,8 @@ Why a cosine instead of a straight (linear) ramp? With a linear schedule, the da
 ```
 
 (The shape above is schematic; the point is the cosine eases in at the start and eases out near the end.)
+
+![Cosine vs linear noise schedule: ᾱ_t over 1000 steps](imgs/diffusion_cosine_schedule.png)
 
 ---
 
@@ -463,6 +467,8 @@ a_100  ─────►│θ │──►│θ │──►│θ │── ...
 ## 11. The architecture, piece by piece
 
 Two halves: an **observation encoder** (turns "what I see" into a conditioning vector `c`) and the **denoiser** (the 1-D conditional U-Net that predicts noise on the action chunk).
+
+![1-D U-Net denoiser with FiLM conditioning and skip connections](imgs/diffusion_unet.png)
 
 ```
 OBSERVATION                                        NOISY ACTION CHUNK
@@ -693,6 +699,27 @@ training:
 ---
 
 ## 20. Glossary
+
+> **Diffusion Policy inference loop (Mermaid)**
+>
+> ```mermaid
+> flowchart LR
+>     subgraph Observation
+>         IMG["image (3,224,224)\n→ ResNet18 → keypoints"]
+>         JNT["joints (6,)\n→ Linear projection"]
+>         COND["concat → c (cond_dim)"]
+>         IMG & JNT --> COND
+>     end
+>     subgraph DDIM["DDIM reverse loop (10 steps)"]
+>         NOISE["x_K ~ N(0,I)\nshape (16,7)"]
+>         UNET["1-D U-Net\nε̂ = model(x_k, k, c)"]
+>         STEP["x_{k-1} = DDIM step\n(remove ε̂ fraction)"]
+>         NOISE --> UNET --> STEP --> |"k=K..1"| UNET
+>     end
+>     COND --> UNET
+>     STEP --> |"k=0 done"| QUEUE["action queue\npush first n_action_steps=8"]
+>     QUEUE --> BOT["send action to robot\nrepeat until queue empty → refill"]
+> ```
 
 | Term | One-line definition |
 |---|---|

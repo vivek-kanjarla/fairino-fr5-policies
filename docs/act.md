@@ -297,6 +297,8 @@ reconstructs the action chunk from the observation **plus** `z`. The loss is **L
 so we set **`z = 0`** (the prior mean) and decode. The result is the simplest, fastest learned
 manipulation policy in this repo.
 
+![ACT CVAE architecture — training vs inference paths](imgs/act_cvae_diagram.png)
+
 ---
 
 ## 4. The five core ideas of ACT
@@ -571,6 +573,8 @@ joint angles in degrees; the 7th is the gripper command.
 ACT produces 100 actions per query, but you must decide *how many to actually execute before
 re-querying*. The repo supports two modes, controlled by `temporal_ensemble_coeff`.
 
+![Action chunking timeline — three successive queries](imgs/act_action_chunking.png)
+
 ### Mode 1 — Plain open-loop chunking (`temporal_ensemble_coeff: null`)
 
 Query the policy, execute all 100 actions open-loop (no new observation for ~3.3 s), then query
@@ -596,6 +600,8 @@ This yields much **smoother** motion with no boundary jerk, and it's effectively
 (it ingests a new observation every step). The cost: the model runs at the full 30 Hz instead of
 once per chunk — in the wrapper, temporal ensembling forces `n_action_steps = 1`. See
 `CONTROL_FREQUENCIES.md` for the timing implications.
+
+![Temporal ensembling blend weights for m=0.01 vs m=0.3](imgs/act_temporal_ensembling.png)
 
 ---
 
@@ -683,6 +689,27 @@ In short: **ACT is the lightweight workhorse.** Start here; escalate only if its
 ---
 
 ## 12. Glossary
+
+> **ACT data flow (Mermaid — renders on GitHub)**
+>
+> ```mermaid
+> flowchart TD
+>     OBS["obs: image (3,224,224)\n+ joints (6,)"]
+>     ACT_CHUNK["action chunk\n(chunk_size, 7)\nground truth (train only)"]
+>     RESNET["ResNet18\n→ spatial-softmax keypoints\n→ feature (B, feat_dim)"]
+>     STATE_PROJ["Linear\njoints → (B, d_model)"]
+>     CVAE_ENC["CVAE Encoder\n(Transformer Encoder)\npeeks at action chunk\n→ μ, σ → z (B,32)"]
+>     CONCAT["concat: image feat + joints + z\n→ input tokens (B, S, d_model)"]
+>     TRANS_DEC["Transformer Decoder\n(7 layers, 512-wide)\naction queries × S"]
+>     OUTPUT["predicted chunk\n(B, chunk_size, 7)"]
+>     LOSS["L1 recon + KL loss"]
+>
+>     OBS --> RESNET & STATE_PROJ
+>     ACT_CHUNK --> CVAE_ENC
+>     OBS --> CVAE_ENC
+>     RESNET & STATE_PROJ & CVAE_ENC --> CONCAT
+>     CONCAT --> TRANS_DEC --> OUTPUT --> LOSS
+> ```
 
 - **Action chunking** — predicting many future actions at once instead of one at a time.
 - **Activation function / nonlinearity** — a function (e.g. ReLU) between linear layers that lets

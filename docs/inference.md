@@ -53,6 +53,8 @@ and **how you turn overlapping predictions into one command**. Three strategies 
 
 ## 3. temporal ensembling (ACT-specific, explained once)
 
+![Action chunking: three queries tiling the timeline](imgs/act_action_chunking.png)
+
 Without it, ACT executes a whole chunk then predicts a fresh one — and at that boundary the
 new chunk may not perfectly continue the old motion, causing a small **jerk**.
 
@@ -102,6 +104,10 @@ the heavy model actually runs.
 Key reading of the "re-query every" column: ACT-no-TE and the queue policies run the heavy
 network *rarely* (once per chunk) and coast on cached actions in between; ACT-with-TE runs it
 *every* step. That single fact drives the latency profile.
+
+![Query cadence for all 6 policies over ~4 seconds at 30 Hz](imgs/inference_cadence.png)
+
+![Temporal ensembling blend weights: m=0.01 (smooth) vs m=0.3 (reactive)](imgs/act_temporal_ensembling.png)
 
 ---
 

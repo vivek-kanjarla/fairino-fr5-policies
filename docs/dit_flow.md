@@ -346,6 +346,8 @@ The name is historical: "Diffusion Transformer" was coined for transformers used
 in *diffusion* models, but the same architecture works for flow matching, which is
 what we use here.
 
+![Flow matching (straight-line paths) vs DDPM (curved noisy paths)](imgs/flow_matching_vs_ddpm.png)
+
 ---
 
 ## 3. Flow matching: the math, fully unpacked
@@ -748,6 +750,8 @@ normalization of every layer, so the same transformer produces different action
 chunks for different situations. The MLP "expansion factor" is 4× (hidden ->
 4·hidden -> hidden), standard for transformers.
 
+![DiT AdaLN-Zero block — how conditioning γ,β,α control each layer](imgs/dit_adaln_block.png)
+
 ---
 
 ## 8. Inference: integrating the ODE
@@ -1020,6 +1024,27 @@ a showcase of the model's strengths.
 ---
 
 ## 13. Glossary
+
+> **DiT + Flow inference loop (Mermaid)**
+>
+> ```mermaid
+> flowchart LR
+>     subgraph Encoding
+>         IMG["image\n→ CLIP ViT-B/16\n→ 768-d"]
+>         TXT["task text\n→ CLIP text enc\n→ 512-d"]
+>         ST["state (6,)\n→ direct"]
+>         COND["c = concat(img, txt, state)"]
+>         IMG & TXT & ST --> COND
+>     end
+>     subgraph ODE["Euler ODE (10 steps t=0→1)"]
+>         NOISE["x_0 ~ N(0,I)\nshape (32,7)"]
+>         DIT["DiT\nv = v_θ(x_t, t, c)\nAdaLN-Zero blocks"]
+>         STEP["x_{t+Δt} = x_t + Δt·v"]
+>         NOISE --> DIT --> STEP --> |"next t"| DIT
+>     end
+>     COND --> DIT
+>     STEP --> |"t=1 done"| ACT["action chunk (32,7)\n→ execute all → refill"]
+> ```
 
 - **action chunk** — a sequence of consecutive actions predicted in one shot (here
   32 actions × 7 numbers).

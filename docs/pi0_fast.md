@@ -481,6 +481,8 @@ information that mattered.
 > zeros; the padded coordinates are smooth constants (all zero), so they cost
 > essentially no tokens after DCT+BPE.
 
+![DCT energy concentration: a 50-step trajectory compressed to ~8 coefficients](imgs/pi0_fast_dct_energy.png)
+
 ---
 
 ## 4. Worked example: a tiny 4-sample DCT

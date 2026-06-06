@@ -674,6 +674,37 @@ joint angles in degrees; the 7th is the gripper command.
 
 ## 8. Inference: open-loop chunks vs temporal ensembling
 
+### 8.0 The 30 Hz control loop — what actually happens tick by tick
+
+**Hz = times per second.** 30 Hz means the loop fires **once every 33 ms**:
+
+```
+1 second = 1000 ms
+1000 ms / 30 = 33.3 ms per tick
+```
+
+Same logic for reference: a 60 Hz monitor refreshes every 16.7 ms; the FR5's internal servo loop
+runs at 1000 Hz = every 1 ms.
+
+Each tick of the policy loop does exactly four things:
+
+```
+tick at t=0  (0 ms):
+    1. read joint encoders from FR5        →  state  (7,)
+    2. grab latest wrist camera frame      →  image  (3, 224, 224)
+    3. model.predict(state, image)         →  action (7,)
+    4. send action to FR5                  →  robot moves
+
+tick at t=1  (33 ms):   repeat
+tick at t=2  (66 ms):   repeat
+...
+```
+
+Between your 33 ms commands the FR5's own 1000 Hz servo loop holds and interpolates to the last
+target you sent — so the arm moves smoothly even though you only update it 30 times a second.
+**The 30 Hz rate is set by the camera** (the D405 produces 30 frames per second), so there is no
+point running the policy faster than that — you wouldn't get new image information anyway.
+
 ACT produces 100 actions per query, but you must decide *how many to actually execute before
 re-querying*. The repo supports two modes, controlled by `temporal_ensemble_coeff`.
 
@@ -681,17 +712,80 @@ re-querying*. The repo supports two modes, controlled by `temporal_ensemble_coef
 
 ### Mode 1 — Plain open-loop chunking (`temporal_ensemble_coeff: null`)
 
-Query the policy, execute all 100 actions open-loop (no new observation for ~3.3 s), then query
-again. In the wrapper this corresponds to `n_action_steps = chunk_size = 100`. Cheapest (one
-model call per chunk) but motion can **jerk at chunk boundaries**, where a fresh chunk based on a
-new observation may disagree with where the old chunk left off.
+Query the policy once, blindly execute all 100 actions in sequence (no new observation for
+100 × 33 ms ≈ **3.3 seconds**), then query again:
+
+```
+t=0:    query → chunk A  =  [a0, a1, a2, ... a99]
+t=0:    send a0
+t=1:    send a1   ← no new query, just popping from the chunk
+t=2:    send a2
+...
+t=99:   send a99
+t=100:  query → chunk B  =  [a0, a1, ... a99]   ← new observation here
+t=100:  send a0
+...
+```
+
+Cheapest (one model call per 100 steps) but at the **chunk boundary** (t=100) the new chunk
+starts from a fresh observation that may disagree with where the old chunk left off → small
+**jerk** in the motion.
 
 ### Mode 2 — Temporal ensembling (`temporal_ensemble_coeff: 0.01`, the default here)
 
-Re-query the policy **every single step**, and at each step **blend all the still-valid
-overlapping predictions** for the current time. Because chunks overlap, at any given step you
-hold several predictions for "the action right now" made at different past times; you combine
-them with an exponentially-weighted average:
+Re-query the model **every single step** (every 33 ms). Now chunks overlap — at step t=3 you
+have four predictions for "what action to send right now":
+
+```
+t=0:  query → chunk A predicts actions for steps  0, 1, 2, ... 99
+t=1:  query → chunk B predicts actions for steps  1, 2, 3, ... 100
+t=2:  query → chunk C predicts actions for steps  2, 3, 4, ... 101
+t=3:  query → chunk D predicts actions for steps  3, 4, 5, ... 102
+
+at t=3, predictions available for "right now":
+    chunk D's prediction for step 3  ← age 0  (just computed)
+    chunk C's prediction for step 3  ← age 1  (computed 1 tick ago)
+    chunk B's prediction for step 3  ← age 2  (computed 2 ticks ago)
+    chunk A's prediction for step 3  ← age 3  (computed 3 ticks ago)
+```
+
+Instead of picking one, **blend them** with exponentially decaying weights:
+
+```
+w(age) = exp(−m × age)          m = temporal_ensemble_coeff = 0.01
+
+age 0  →  exp(0)     = 1.000
+age 1  →  exp(−0.01) = 0.990
+age 2  →  exp(−0.02) = 0.980
+age 3  →  exp(−0.03) = 0.970
+
+normalise so weights sum to 1:
+w = [0.253, 0.251, 0.249, 0.247]   ← nearly uniform (m=0.01 is tiny)
+
+action_sent = 0.253·(D's pred) + 0.251·(C's pred) + 0.249·(B's pred) + 0.247·(A's pred)
+```
+
+**Why blending removes the jerk.** Each individual chunk has small prediction errors. By
+averaging many overlapping predictions for the same timestep, errors cancel out. You never
+suddenly switch from one chunk's plan to another's — you are always mixing many of them.
+And because you re-query every step, the newest chunk always has the **latest observation** —
+if something moved, the age-0 weight grows relative to older stale chunks.
+
+**The m parameter:**
+
+```
+weight(age) = exp(−m × age)
+```
+
+| m | effect |
+|---|---|
+| 0.01 (this repo) | nearly flat weights — old predictions trusted almost as much as new. very smooth, slow to react |
+| 0.3 | weight drops fast with age — recent predictions dominate. more reactive, slightly less smooth |
+| → 0 | pure uniform average of all past predictions |
+| → ∞ | only the newest chunk used — equivalent to no ensembling |
+
+**The cost:** the model runs at the full 30 Hz (every tick) instead of once per 100 ticks. You
+pay the full forward pass 100× more often than open-loop chunking.
 
 ```
 weight(age) = exp( −coeff · age )
@@ -700,12 +794,17 @@ weight(age) = exp( −coeff · age )
 - `coeff` — `temporal_ensemble_coeff`. **Smaller `coeff` ⇒ older predictions keep more weight**
   (smoother, more inertia); larger ⇒ trust the freshest prediction more (more reactive).
 
-This yields much **smoother** motion with no boundary jerk, and it's effectively **closed-loop**
-(it ingests a new observation every step). The cost: the model runs at the full 30 Hz instead of
-once per chunk — in the wrapper, temporal ensembling forces `n_action_steps = 1`. See
-`CONTROL_FREQUENCIES.md` for the timing implications.
-
 ![Temporal ensembling blend weights for m=0.01 vs m=0.3](imgs/act_temporal_ensembling.png)
+
+**Side by side:**
+
+| | Open-loop chunk | Temporal ensembling |
+|---|---|---|
+| Model queries per 100 steps | **1** | **100** |
+| Observation freshness | stale for up to 3.3 s | fresh every 33 ms |
+| Chunk boundary jerk | yes | no |
+| Compute cost | cheap | 100× more expensive |
+| `n_action_steps` in code | 100 | 1 |
 
 ---
 

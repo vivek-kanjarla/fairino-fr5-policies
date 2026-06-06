@@ -409,34 +409,134 @@ Notation: `B` = **batch size** (how many examples processed at once; `batch_size
 
 Component by component:
 
-**(a) The CVAE encoder.** A small transformer encoder (`num_encoder_layers = 4`, and
-`n_vae_encoder_layers` is set to the same value in this wrapper). Its input is the *ground-truth
-future action chunk* (each of the 100 action vectors embedded to `d_model`), plus the joint
-state and a special learned `[CLS]` token (a "summary" slot). It outputs, from the `[CLS]`
-position, two vectors of size `latent_dim = 32`: the mean `μ` and the log-variance `log σ²` of
-the latent distribution. (We predict *log* variance rather than variance so the value is
-unconstrained and `σ = exp(½ log σ²)` is always positive.) **This encoder exists only during
-training** — it's the part that "cheats" by looking at the answer to summarize its style.
+**(a) The CVAE encoder — and what the CLS token is doing.**
 
-**(b) The latent sample.** `z = μ + σ ⊙ ε` with `ε ∼ N(0, I)` (the reparameterization trick from
-§2.7). Shape `(B, 32)`. Then a linear layer embeds `z` into one token of size `d_model`.
+A small transformer encoder (`num_encoder_layers = 4`). Its input sequence is:
 
-**(c) The observation encoder (vision + state fusion).**
-- The `(B, 3, 224, 224)` image goes through **ResNet18** → a spatial feature grid → flattened
-  into ~49 tokens, each projected to `d_model`. **Sinusoidal positional encodings** are added so
-  the transformer knows where each patch sits in the image.
-- The `(B, 7)` state (6 joints + gripper) is linearly embedded into one token of size `d_model`.
-- These tokens are fed through the **transformer encoder** (`num_encoder_layers = 4`), whose
-  self-attention fuses image and proprioceptive ("proprioception" = sense of one's own joint
-  positions) information into a context representation called the **memory**.
+```
+[CLS,  action_0,  action_1,  ...  action_99,  state_token]
+```
+
+- `action_0 … action_99` — the 100 ground-truth future actions, each projected from 7 → `d_model`
+  via a linear layer.
+- `state_token` — the current joint state (7-D), also projected to `d_model` (see (c) below).
+- `[CLS]` — a single **learned embedding** with no initial meaning, prepended to the sequence.
+
+All 102 tokens do **self-attention** with each other. Because every token attends to every other,
+by the time the encoder finishes, `CLS_out` has absorbed information from all 100 action tokens
+and the state token through attention. You then **throw away** the other 101 output vectors and
+only keep `CLS_out`:
+
+```
+CLS_out  (B, d_model)  →  two Linear heads  →  μ (B, 32),  log σ² (B, 32)
+```
+
+Why `[CLS]` and not just average-pool the outputs? Because `[CLS]` is a **learned aggregation**
+— the model learns what to route into it during training, rather than uniformly averaging.
+
+This encoder exists **only during training**. It "cheats" by looking at the real future actions
+to summarize *which style of demo this is* into the latent `z`. At inference you don't have
+future actions, so the entire CVAE encoder is skipped.
+
+**(b) The latent sample z — and why z = 0 at inference.**
+
+```
+z  =  μ  +  σ ⊙ ε,      ε ∼ N(0, I)        ← reparameterization trick
+z  shape:  (B, 32)
+```
+
+The KL loss term forces the encoder's distribution `N(μ, σ²)` to stay close to `N(0, I)` — the
+standard normal. So during training, z encodes "which demo style this is" but is always anchored
+near zero.
+
+**The multimodality problem z solves.** Suppose half the demos reach from the left and half from
+the right. A plain transformer averaging both trajectories predicts straight down the middle →
+crashes. The CVAE fixes this: for left-reach demos the encoder produces z ≈ +0.3; for right-reach
+demos z ≈ -0.3. The decoder learns "z > 0 → reach left, z < 0 → reach right." Each demo gets
+explained by its own z, not a single blurred average.
+
+At inference you have no future actions to run the encoder. You set `z = 0` — the mean of the
+prior `N(0, I)`. Because KL training forced all z values to cluster near zero, this gives the
+"committed average style" — the decoder produces its most confident default prediction.
+
+Then `z (B, 32)` → `Linear(32, d_model)` → one z token `(B, 1, d_model)`, which joins the
+observation encoder's input sequence alongside the image and state tokens.
+
+**(c) The observation encoder — how image and state become tokens.**
+
+**State → 1 token.** The state is `(B, 7)` — 7 numbers (6 joint angles + gripper). A single
+linear layer projects it:
+
+```
+state_token  =  W · state  +  b
+
+W  shape: (d_model, 7)     ← learned weight matrix
+b  shape: (d_model,)       ← learned bias
+
+result: state_token  (B, 1, d_model)
+```
+
+That's it — one matrix multiply. Each of the `d_model` output numbers is a weighted sum of all 7
+input numbers. The weights are learned end-to-end; the network figures out which combinations of
+joints and gripper state matter. The output is in the same `d_model`-dimensional space as every
+other token, which is required for attention to work.
+
+**Image → 49 tokens.** Here's the full chain:
+
+```
+image  (B, 3, 224, 224)
+    ↓  ResNet18 conv layers  (no final global average-pool)
+feature map  (B, 512, 7, 7)
+```
+
+ResNet18 downsamples 32× (224 / 32 = 7), so the spatial output is a **7×7 grid** of
+512-dimensional feature vectors. Each cell in the grid corresponds to a ~32×32 pixel region of
+the original image — spatial structure is preserved (top-left cell "saw" the top-left of the
+image, etc.).
+
+```
+feature map  (B, 512, 7, 7)
+    ↓  reshape spatial dims: 7×7 = 49 positions become a sequence
+(B, 49, 512)
+    ↓  Linear(512, d_model) — same projection applied to every position
+(B, 49, d_model)    ← 49 image tokens
+    ↓  + sinusoidal 2D positional encodings  (so the transformer knows which of
+       the 49 grid positions each token came from)
+ready for self-attention
+```
+
+So you get **49 tokens** simply because 7 × 7 = 49. The "49" is not a free choice — it's fixed
+by ResNet18's architecture (32× downsampling of a 224-px input).
+
+All tokens are now the same shape `(B, *, d_model)` and are concatenated into one sequence:
+
+```
+obs encoder input:
+[  img_patch_0,  img_patch_1,  ...  img_patch_48,   ← 49 image tokens
+   state_token,                                      ← 1 state token
+   z_token       ]                                   ← 1 z token
+                                                        51 tokens total
+```
+
+These 51 tokens do **self-attention** among themselves (`num_encoder_layers = 4` layers). By the
+end, each token has "seen" all the others — image patches know the joint state and z, the state
+token knows what's in the image. The output of this encoder is the **memory**:
+
+```
+memory  (B, 51, d_model)
+```
+
+The memory is exactly the **K and V matrices** in the decoder's cross-attention. The decoder's
+action queries are the Q. So cross-attention is each of the 100 action queries asking: "given
+everything the encoder fused (image + joints + z), what should I — step k of the future — be?"
 
 **(d) The transformer decoder.** It holds `chunk_size = 100` **learned query embeddings** — one
 per future time step (these are the "I am action-slot k" queries). Each query **cross-attends**
-to the memory *and* the `z` token, then a final linear layer maps each of the 100 decoder
-outputs to a 7-dimensional action. Result: the predicted chunk `(B, 100, 7)`, **all 100 produced
-in parallel** (one-shot). Depth is `num_decoder_layers` — **7** in `config.yaml`, **1** in
-`config.local.yaml`. (lerobot's library default is 1; this repo's paper-scale config raises it to
-7. Both are valid — more layers = more capacity but slower.)
+to the memory (K, V = memory; Q = action query), then a final linear layer maps each of the 100
+decoder outputs to a 7-dimensional action. Result: the predicted chunk `(B, 100, 7)`, **all 100
+produced in parallel** (one-shot). Depth is `num_decoder_layers` — **7** in `config.yaml`, **1**
+in `config.local.yaml`. (lerobot's library default is 1; this repo's paper-scale config raises it
+to 7. Both are valid — more layers = more capacity but slower.)
 
 ### 5.2 Inference-time data flow (the CVAE encoder is OFF, `z = 0`)
 

@@ -737,6 +737,62 @@ trajectory) rather than from **how you blend predictions** (temporal ensembling)
 | GPU needed? | no (CPU ok) | no | yes for real-time |
 | Temporal ensembling? | yes | no | **no** |
 
+### 14.6 Can you apply temporal ensembling to Diffusion Policy? (and why jerkiness happens)
+
+**Yes — and people do.** The idea: instead of the queue approach, re-query the diffusion
+model every step, get a full chunk each time, and blend overlapping predictions with
+exponential weights exactly like ACT:
+
+```
+t=0:  DDIM → chunk A  predicts steps 0..15
+t=1:  DDIM → chunk B  predicts steps 1..16
+t=2:  DDIM → chunk C  predicts steps 2..17
+
+at t=2, blend all predictions for "right now":
+    w0·(C's pred for t=2) + w1·(B's pred for t=2) + w2·(A's pred for t=2)
+    w(age) = exp(−m · age),  normalised to sum to 1
+```
+
+The original Diffusion Policy paper mentions this as a variant. It removes chunk-boundary
+jerk completely.
+
+**The cost problem.** ACT temporal ensembling is cheap — 1 forward pass per query.
+Diffusion temporal ensembling is expensive — 10 U-Net calls per query:
+
+```
+ACT temporal ensembling:   1  forward pass  × 30 Hz =  30 forward passes/sec
+Diffusion + TE:            10 U-Net calls   × 30 Hz = 300 U-Net calls/sec
+```
+
+You need a fast GPU for this to fit the 33 ms budget. Some labs run it at 15 Hz instead
+of 30 Hz to halve the cost.
+
+**Other approaches to reduce jerkiness (without full TE):**
+
+| approach | idea | cost |
+|---|---|---|
+| Temporal ensembling | re-query every step, blend overlapping chunks | 10× more U-Net calls |
+| Smaller execution window | e.g. 4-of-32 instead of 8-of-16 — re-query more often | 2× more calls |
+| Low-pass filter | `a_sent = α·a_new + (1-α)·a_prev` on the raw action | free, adds lag |
+| Overlapping refill | start next DDIM at step 4 so new chunk is ready before old runs out | 2× calls, smoother handoff |
+
+**Why jerkiness happened in this repo specifically — three separate causes:**
+
+1. **Only 2 episodes of training data.** The dominant cause. The model hasn't seen enough
+   variation to produce smooth trajectories. More data fixes this more than any inference trick.
+
+2. **Chunk boundary transitions.** Even a well-trained model has small discontinuities when
+   the queue refills and the new chunk's a0 doesn't perfectly continue where the old a7 left
+   off. Temporal ensembling or a smaller execution window fixes this.
+
+3. **CPU inference stall.** The DDIM refill tick takes ~250 ms on CPU. During that one tick
+   the robot has no new command and physically lurches. This fires every 8 steps (every 267 ms)
+   — you'd see a rhythmic jerk roughly 4 times per second. On a GPU the refill drops to ~5 ms
+   and is imperceptible. **This is likely the biggest visible contributor to what you saw.**
+
+Bottom line: get a GPU and more training data first. If jerkiness persists after that,
+add temporal ensembling or shrink the execution window.
+
 ---
 
 ## 15. Normalization (what the wrapper does)

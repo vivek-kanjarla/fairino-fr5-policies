@@ -617,6 +617,46 @@ t=9:  pop a1 → send
 The model only calls the U-Net on ticks where the queue empties — **once every 8 steps
 (~267 ms)**. The other 7 ticks just pop from the queue and cost almost nothing.
 
+**Important: you are NOT sending only the 8th action.** You send all 8 actions, one per
+tick — a0 at tick 0, a1 at tick 1, ..., a7 at tick 7. These were all predicted in a single
+DDIM call at t=0 as the model's best guess of what to do at each of those 8 future moments.
+The robot is executing a **pre-computed 8-step plan**, then re-planning with a fresh
+observation when the plan runs out.
+
+To make this concrete — at t=0 DDIM gives you:
+
+```
+chunk = [a0, a1, a2, a3, a4, a5, a6, a7,  a8, a9, a10, a11, a12, a13, a14, a15]
+         ←────────── push into queue ──────→   ←──────── thrown away ────────────→
+```
+
+Then the queue drains one per tick:
+
+```
+t=0ms:    send a0   ← "what to do right now"           (from this DDIM call)
+t=33ms:   send a1   ← "what to do 1 step from now"
+t=66ms:   send a2
+t=99ms:   send a3
+t=132ms:  send a4
+t=165ms:  send a5
+t=198ms:  send a6
+t=231ms:  send a7   ← "what to do 7 steps from now"
+
+t=267ms:  queue empty → DDIM fires again with current obs → new 8-step plan
+t=300ms:  send a0 of new plan
+...
+```
+
+DDIM fires roughly **4 times per second** (1000 ms / 267 ms ≈ 3.7). Compare that to ACT:
+
+| | ACT (no TE) | Diffusion Policy | ACT (TE on) |
+|---|---|---|---|
+| Re-query every | 3.3 s | **267 ms** | 33 ms |
+| Re-queries per second | 0.3 | **~4** | 30 |
+
+Diffusion Policy sits comfortably in the middle — far more reactive than open-loop ACT,
+far less compute-heavy than temporal-ensembling ACT.
+
 ### 14.2 Why predict 16 but execute only 8?
 
 Two competing pressures:

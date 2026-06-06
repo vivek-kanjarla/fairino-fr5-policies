@@ -1,67 +1,92 @@
 # Imitation Learning — Known Failure Modes and How the FR5 Hit Them
 
-A map of the structural ways behavioral cloning (BC) fails, grounded in the
-literature, with a concrete column showing exactly where the FR5 pick-policy
-experiments fell into each trap.
+A comprehensive map of the structural ways behavioral cloning (BC) fails, grounded in the
+literature, with a concrete column showing exactly where the FR5 pick-policy experiments
+fell into each trap — and a prioritized remediation plan at the end.
 
 ---
 
-## 0. Why BC is fragile by design
+## 0. Why BC is Fragile by Design
 
-Behavioral cloning trains a policy π(a|o) by supervised learning on
-(observation, action) pairs from human demonstrations. It minimizes prediction
-error on the *training distribution* — it has no mechanism to distinguish
-between causes and correlations, no feedback loop, and no way to recover from
-states it was never shown.
+Behavioral cloning trains a policy π(a|o) by supervised learning on (observation, action)
+pairs from human demonstrations. The training objective is:
 
-Every failure mode below is a consequence of one of those three gaps.
+```
+L_BC = E_{(o,a) ~ D} [ ||π(o) - a||² ]
+```
+
+This formulation has three structural gaps that every failure mode below exploits:
+
+| Gap | What it means | Which failure modes |
+|---|---|---|
+| No causal reasoning | Minimizes prediction error; can't distinguish cause from correlation | §1, §3 |
+| No feedback loop | No mechanism to detect or recover from errors at deploy time | §2, §5 |
+| No out-of-distribution handling | Undefined behavior on states not in D | §2, §4 |
+
+BC is strictly worse than online RL at all three. It is used anyway because it is cheap,
+safe, and fast to collect demonstrations for — but those advantages come with structural
+fragility that must be explicitly designed around.
 
 ---
 
 ## 1. Causal Confusion / Proprioceptive Shortcut
 
-### What it is
+### 1.1 What it is
 
-BC learns a *discriminative* model: "given this observation, what action was
-demonstrated?" It does not learn a *causal* model: "which part of the
-observation actually caused the demonstrated action?"
+BC learns a *discriminative* model: "given this observation, what action did the expert
+take?" It does not learn a *causal* model: "which part of the observation *caused* the
+expert to take that action?"
 
-When a shortcut exists — an input that cheaply predicts the action without
-being the true cause — the model takes it. This is the core result of:
+These two formulations are equivalent only when the training data has no spurious
+correlations. In practice they almost always differ. This is the core result of:
 
 > de Haan, Jayaraman, Levine — "Causal Confusion in Imitation Learning"
 > NeurIPS 2019 · https://arxiv.org/abs/1905.11979
 
-The proprioceptive form: the robot's joint state is numerically clean and
-simple. Vision requires learning detection-like features from raw pixels.
-If the joint state at episode-start correlates with the grasp location (because
-the operator started near the object), the model learns a cheap
-*proprioceptive autoregression* — "continue from where I am" — and never needs
-to use the cameras.
+The paper formalizes it with Pearl's do-calculus: a BC policy learns P(a|o), but the
+causal quantity is P(a|do(o)) — the distribution of actions if you *intervene* to set o,
+rather than merely *observe* it. When a non-causal input (e.g. a dashboard light in the
+driving demo) correlates with the action (e.g. braking), BC bakes in that correlation
+and fails as soon as the correlation breaks at deploy time.
 
-### How it shows up at deployment
+### 1.2 The proprioceptive shortcut specifically
 
-At training: varied start poses → state predicts grasp → low loss, vision
-ignored.
-At deploy: fixed home start → state is constant → same "average" reach every
-time → grasps empty air regardless of object position.
+The robot's joint state is numerically clean, low-dimensional (6–13 numbers), and
+already perfectly aligned with the action space (the next joint angles to command).
+Vision requires learning detection-like features from raw 224×224×3 pixels through a
+full ResNet18 — far more capacity and gradient signal to train.
 
-The motion *looks* correct (clean reach-close-lift arc) but goes to the wrong
-place.
+Gradient descent is lazy: if minimizing `||π(state) - a||²` gets the training loss low
+enough, it never has to solve `||π(image) - a||²`. The vision pathway gets trained just
+enough to not increase the loss, not enough to be reliable.
 
-### FR5 evidence — what we measured
+### 1.3 Why the shortcut forms: the math
 
-We ran causal intervention probes on three trained models
-(`experiments/shortcut_probe.py`):
+In the FR5 setup, the operator started the arm *near* the object before recording. This
+created a correlation:
+
+```
+corr(q_start, q_grasp) = 0.45     (q = joint angle vector)
+```
+
+From the policy's perspective, minimizing the loss requires predicting the grasp
+trajectory. The cheapest predictor of q_grasp is q_start (corr=0.45). The next cheapest
+is the vision pathway (corr≈0.67 with object position, but only recoverable when state
+is neutralized). Since q_start is immediately available in the observation and has lower
+prediction error, state wins.
+
+At deploy time q_start is always the home pose — constant across episodes — so the
+policy always predicts the same average trajectory.
+
+### 1.4 FR5 evidence
+
+Three trained models probed with causal interventions (`experiments/shortcut_probe.py`):
 
 | Intervention | What changes | What stays | Result |
 |---|---|---|---|
 | Image ablation | blank cameras | real state | action barely changes |
 | State ablation | mean state | real cameras | action moves 3.6–5.2× more |
-| Conflict swap | state from ep_i + image from ep_j | — | reach follows **state** (corr +0.85–0.88), not image (corr −0.14 to −0.29) |
-
-The conflict swap is decisive: when the image and the proprioception point at
-*different* object locations, the policy follows the state every single time.
+| Conflict swap | state_i + image_j (different episode) | — | reach follows **state** (corr +0.85–0.88), not image (corr −0.14 to −0.29) |
 
 | Model | State dim | Image-ablation Δ | State-ablation Δ | Ratio | Follows image | Follows state |
 |---|---|---|---|---|---|---|
@@ -69,201 +94,615 @@ The conflict swap is decisive: when the image and the proprioception point at
 | Diffusion v1 | 6 | 5.0° | 19.7° | **4.0×** | −0.29 | **+0.85** |
 | Diffusion v2 (rich) | 13 | 5.2° | 18.8° | **3.6×** | −0.28 | **+0.88** |
 
-**Notable:** Diffusion v2 had a *richer* state (13-D: joints + eef + gripper).
-More state → stronger shortcut. A higher-capacity state representation gives
-the model more to lean on and less reason to learn vision. Adding more
-proprioception made it worse, not better.
+**Counterintuitive result:** Diffusion v2 had a richer state (13-D: joints + eef +
+gripper). More state → stronger shortcut (ratio 5.2× → 3.6× is better, but image
+correlation −0.28 vs −0.14 is worse — meaning v2 relies on state even more absolutely
+and the residual vision signal is even more suppressed). Adding proprioception helped
+the shortcut, not the task.
 
-### Root cause in the FR5 data
+This matches causal confusion theory exactly: a richer shortcut input means less gradient
+pressure on the harder vision pathway.
 
-The operator tended to start the arm near the object. The probe measured this
-directly:
+### 1.5 What a healthy model looks like
 
-```
-corr(start-pose J1, grasp J1) = 0.45
-J2 std across episodes = 17°,  J4 std = 21°   ← start poses were varied
-```
+For comparison, a policy that has learned to use vision should show:
 
-So the initial joint configuration *half-predicted* the grasp location. With
-only ~54 training episodes there was not enough pressure for the harder vision
-pathway to compete with that cheap signal.
+| Metric | Shortcut model (FR5) | Healthy model |
+|---|---|---|
+| Image-ablation Δ | ~5° | large (policy can't act without cameras) |
+| State-ablation Δ | ~26° | small (state is a minor refinement) |
+| Ablation ratio | 5× | ≤1.5× |
+| Conflict swap → image corr | −0.14 | +0.7 or higher |
+| Conflict swap → state corr | +0.85 | ≤0.2 |
 
-### Fix
+### 1.6 Fix
 
-1. Fixed home start + widely varied object position across demos (breaks the
-   correlation at the source)
-2. 100–150+ demos (raises the floor that state alone can reach, forcing vision
-   to compete)
-3. Proprioception dropout 20–40% during training (randomly zeros state so the
-   loss cannot be driven by state alone)
-4. State-free policy — drop proprioceptive input entirely; Zhao et al. 2025
-   showed this improved height generalization 0% → 85%
+Priority order:
+
+1. **Break the correlation in the data.** Fixed home start + widely varied object
+   position. This is the only fix that attacks the root cause at the source.
+2. **More demonstrations (100–150+).** Raises the difficulty floor for the state
+   pathway, forcing vision to contribute.
+3. **Proprioception dropout (20–40%).** During training only: randomly zero the
+   entire state vector. The policy can't rely on state for zeroed samples, so the
+   vision pathway is forced to carry the loss.
+
+   ```python
+   # training loop only — flag is False at eval/deploy
+   if training and torch.rand(1).item() < proprio_dropout_rate:
+       state = torch.zeros_like(state)
+   ```
+
+4. **State-free policy.** Drop proprioceptive input entirely. Zhao et al. 2025 showed
+   this improved height generalization 0% → 85%, horizontal 6% → 64%. The vision-only
+   policy has no shortcut available and is forced to solve the visual problem.
 
 ---
 
-## 2. Covariate Shift / Distributional Shift
+## 2. Covariate Shift and Compounding Errors
 
-### What it is
+### 2.1 What it is
 
-The policy is trained on states visited by the *expert*. Once deployed, small
-prediction errors move the robot to slightly off-trajectory states — states the
-expert never visited, so the policy has never been trained on them. From that
-new state, the policy makes another error. Errors compound.
+BC trains on (o, a) pairs where the observation o comes from the *expert's* trajectory.
+At deploy, the robot takes an action, lands in a new state, and generates a new
+observation. If that new observation differs even slightly from what the expert would
+have produced, the policy is now being queried on an out-of-distribution input.
 
-The formal bound (Ross & Bagnell 2010, DAgger paper): under BC, the expected
-cost after T steps scales as **O(T²)** — quadratic in horizon. Under DAgger
-(interactive correction), it's O(T). This is why long-horizon tasks fail
-catastrophically even when short-horizon ones work.
+The problem compounds: a small error at step t puts the robot in state s' ≠ s_expert.
+The policy predicts an action from s', which may be wrong, landing in s'' further from
+the expert trajectory. Each step the errors accumulate.
 
-### How it shows up at deployment
+### 2.2 The formal bound
 
-The robot starts performing the task correctly for the first few seconds, then
-drifts — a joint goes slightly too far, a grasp misses by a few mm, and the
-next prediction is made from a state that never appeared in training. The
-policy has no recovery strategy; it either freezes or produces garbage.
+Ross & Bagnell 2011 (DAgger paper) prove:
 
-### FR5 evidence
+```
+E[cost_BC]    ≤  T · ε_BC + O(T²)        BC under covariate shift
+E[cost_DAgger] ≤  T · ε_DAgger + O(T)    interactive imitation learning
+```
 
-The "went absolute nuts" episodes: the model starts the reach plausibly but
-then executes increasingly incoherent actions. This is the compounding-error
-signature. The first 300ms (roughly one ACT chunk at 30 Hz) looks fine; after
-that it breaks down.
+Where ε is the per-step expected loss under the learner's own state distribution.
+The O(T²) term for BC means: on a 10-second horizon (300 steps at 30 Hz), errors grow
+with T² — catastrophically faster than linear. This is why long-horizon manipulation
+tasks fail even when short demos look fine.
 
-The 3.3-second open-loop execution window in the VRworking version made this
-especially severe — no re-planning, no state feedback, just 100 pre-computed
-actions played back regardless of what actually happened.
+### 2.3 How it shows up
 
-### Fix
+The robot starts plausibly — the first 200–300ms of ACT's chunk or the first few
+diffusion steps look like the demo. Then a joint overshoots by 2°. The next observation
+is slightly wrong. The policy was never trained on this exact configuration, so the next
+action is also slightly wrong. By second 2, the arm is doing something that no human
+ever demonstrated and the policy produces garbage.
 
-- Shorter re-planning interval (ACT temporal ensembling helps because it re-
-  plans every tick rather than committing to the whole chunk)
-- DAgger: collect new demos at states where the policy drifts (expensive, needs
-  an interactive setup)
-- Residual policies or hybrid controllers that fall back to a hard-coded
-  heuristic when confidence is low
+Signature: **correct for 1 chunk, then rapidly degrades.** Often produces jerky or
+oscillatory motion — the policy is jumping between nearby training trajectories that
+share similar (but not identical) observations.
+
+### 2.4 FR5 evidence
+
+The "went absolute nuts" episodes. The model's first 300ms (one ACT chunk) looked
+plausible, then the reach deviated, the gripper went to the wrong height, and the final
+position was completely wrong.
+
+The VRworking repo executed 100 actions (3.3 seconds) completely open-loop — no
+replanning. This is the worst-case covariate shift scenario: 3.3 seconds of error
+accumulation with T²=1089× penalty.
+
+ACT's temporal ensembling partially mitigates this: instead of committing to a 100-step
+chunk, each tick re-plans with the current state observation. The re-planning anchors the
+trajectory back toward a reasonable expert state every 33ms, limiting how far the error
+can compound before correction.
+
+### 2.5 Interaction with proprioceptive shortcut
+
+The two failure modes amplify each other:
+
+```
+Step 1: Proprioceptive shortcut → wrong reach direction
+Step 2: Arm arrives at wrong location → never seen in training
+Step 3: Covariate shift → policy produces incoherent recovery action
+Step 4: Robot is now far from any training state → pure garbage
+```
+
+If you fix the shortcut (vision is now used) but don't fix the data coverage, covariate
+shift is still active whenever the arm reaches a novel view angle or lighting condition.
+
+### 2.6 Fix
+
+| Fix | Effort | Effect |
+|---|---|---|
+| More demos covering the workspace | Medium | Reduces the size of the OOD region |
+| Shorter action chunks + temporal ensembling | None (already in ACT) | Re-plans every 33ms, limits accumulation |
+| DAgger | High | Directly collects demos at the states the policy actually reaches |
+| Ensemble / uncertainty gating | Medium | Detects OOD states, triggers recovery behavior |
+
+**DAgger in practice:** run the policy, record the states it reaches, ask the operator
+to demonstrate from those states, add to the dataset, retrain. Repeat. Expensive but
+the only method with a theoretical guarantee.
 
 ---
 
 ## 3. Mode Averaging / Multimodal Demonstration Collapse
 
-### What it is
+### 3.1 What it is
 
-When demonstrations are multimodal — the expert sometimes reaches left,
-sometimes right — a BC policy trained with L2 loss learns the *average* of
-the two modes. The average is often a physically impossible or task-failing
-trajectory (reaching to the midpoint between both options).
+When demonstrations are multimodal — the expert sometimes approaches from the left,
+sometimes from the right — the dataset contains two action clusters for the same (or
+similar) observation. BC with L2 loss minimizes:
 
-ACT specifically addresses this via the CVAE: the latent z encodes which mode
-is intended. At inference z=0 is used, which is the prior — roughly the
-"default" or "most common" mode, not the average of all modes.
+```
+E[ ||π(o) - a||² ]
+```
 
-### How it shows up at deployment
+When a has two modes a_L and a_R with equal probability, the loss-minimizing prediction
+is:
 
-The robot reaches for an in-between point that corresponds to no real grasp
-location, or wavers. It is especially visible when grasping from either side
-of an object is demonstrated.
+```
+π*(o) = E[a|o] = 0.5 * a_L + 0.5 * a_R
+```
 
-### FR5 evidence
+This is the average — a trajectory that goes *between* the two approaches, which is
+physically wrong and fails the task. The model doesn't know it's supposed to pick one;
+it just minimizes the squared error.
 
-Less severe here because pick-place demonstrations are mostly unimodal (one
-object, one target). The "sometimes it works, sometimes absolute nuts" report
-likely reflects covariate shift more than mode collapse. However, if demos were
-recorded from multiple operator start positions covering different approach
-angles, averaging is a contributing factor to the inconsistent success.
+### 3.2 Why action chunking helps but doesn't fully solve it
 
-### Fix
+ACT and diffusion policy predict an entire trajectory chunk, not a single action. For
+chunked prediction, the multimodality is even more severe — two entire future trajectories
+are averaged, not just two actions. The averaged chunk is a physically impossible
+compromise path.
 
-- ACT's CVAE forces the policy to commit to one mode (z encodes intent)
-- Diffusion policy handles multimodality naturally (the denoising process
-  converges to one sample, not the mean)
-- Ensure demonstrations are consistent: same operator, same approach angle,
-  same grasp strategy
+ACT's CVAE is the explicit fix: the latent z encodes which mode is intended. At inference,
+z is sampled from the prior (or set to 0), which commits to one mode rather than averaging.
+Diffusion handles it by converging to a single sample from the data distribution, not the
+mean — the stochastic sampling process naturally lands in one mode or the other.
+
+### 3.3 FR5 evidence
+
+Less severe here because pick-place is mostly unimodal (single object, single target, one
+reasonable approach direction). However:
+
+- If different operators recorded demos with different preferred approach angles, those
+  contribute to bimodality
+- If the object was sometimes grasped from above and sometimes from the side, those are
+  two modes
+- The "sometimes works, sometimes absolute nuts" pattern is more consistent with
+  covariate shift (§2) than mode collapse — but if the policy sometimes reaches left and
+  sometimes right with no clear trigger, mode averaging is a contributing factor
+
+### 3.4 Fix
+
+- ACT (CVAE with z=0): already handles this in your setup
+- Diffusion policy: handles it naturally through sampling
+- For pure BC: Gaussian Mixture output heads, or energy-based models
+- Data curation: ensure consistent demonstration style (same approach direction, same
+  grasp strategy across all episodes)
 
 ---
 
 ## 4. Data Insufficiency and Coverage Gaps
 
-### What it is
+### 4.1 What it is
 
-A BC policy can only generalize across states it has seen during training —
-or states that are close enough in the input space that the learned features
-transfer. With too few demos, large regions of the workspace (object positions,
-approach angles, lighting conditions) are uncovered.
+BC can only generalize to states that are within the "support" of the training
+distribution — i.e., states that are close enough in observation space that the
+learned features transfer. With sparse demos, most of the workspace is uncovered.
 
-The threshold observed in practice: below ~100 demonstrations, most policies
-show unreliable behavior on held-out object positions. At 100–150 demos the
-shortcut pressure drops enough for vision to start contributing.
+The problem is especially acute for vision-based policies because the observation space
+(224×224×3 = 150K dimensions) is astronomically large. The ResNet18 features must be
+trained to be invariant to lighting, view angle, background clutter, and object pose
+variation. This requires seeing enough *diverse* examples that the invariances are
+learned — not just enough examples total.
 
-### FR5 evidence
+### 4.2 Coverage in different axes
 
-~54 training episodes. Object placed in a limited region of the workspace.
-This directly enabled the proprioceptive shortcut (section 1) and amplified
-distributional shift (section 2) — the model never saw enough visual diversity
-to build a robust object detector in its ResNet features.
+| Axis | FR5 status | Required coverage |
+|---|---|---|
+| Object X position | Limited region | Full workspace grid |
+| Object Y position | Limited region | Full workspace grid |
+| Object Z (height) | Fixed table | Vary ±5cm at minimum |
+| Approach angle | Operator-dependent, variable | Fixed one approach OR all angles |
+| Lighting | Lab lighting (consistent) | OK if deployment conditions match |
+| Object orientation | Fixed | Vary if object can be placed in different orientations |
+| Background clutter | None | Add some clutter to prevent background memorization |
 
-### Fix
+### 4.3 The 100-demo threshold
 
-- Collect more demos: target 100–150 as a minimum; 200+ if the workspace is
-  large or the task has high variance
-- Vary object position systematically across the full workspace (not just the
-  center region)
-- Vary lighting, object orientation, background if sim-to-real is in scope
+Community consensus across the ACT, Diffusion Policy, and lerobot communities:
+
+- **<50 demos:** vision pathway rarely wins against the proprioceptive shortcut
+- **50–100 demos:** vision starts contributing but is unreliable; shortcut is still
+  dominant for novel object positions
+- **100–150 demos:** threshold where vision-primary behavior begins to emerge
+- **150–300 demos:** reliable generalization across a defined workspace region
+- **300+ demos:** needed for large workspaces or high object diversity
+
+The FR5 had ~54 demos. This placed it firmly in the "shortcut dominant" regime.
+
+### 4.4 Why quantity is not enough — diversity matters more
+
+Consider two datasets:
+- Dataset A: 200 demos, all with the object in the same 5cm region
+- Dataset B: 80 demos, object uniformly spread across a 40×40cm workspace
+
+Dataset B will produce a more vision-reliant policy despite having fewer total demos.
+Coverage of the *state space* is what matters, not the total count.
+
+Practical implication: before collecting 150 demos, define a grid of object positions and
+ensure each grid cell has at least 3–5 demos. A structured sweep is better than a random
+collection.
+
+### 4.5 FR5 evidence
+
+54 episodes, object placed in a limited region. The shortcut formed precisely because
+there wasn't enough workspace diversity to make vision necessary. The bigger ACT model
+(94M params) had *the same validation loss* as the small one — this is the classic
+signature of data bottleneck rather than capacity bottleneck. More model capacity doesn't
+help when the training data doesn't require it.
+
+### 4.6 Fix
+
+1. Define a workspace grid (e.g. 4×4 = 16 cells, 3cm per cell)
+2. Collect at least 5 demos per grid cell = 80 demos minimum
+3. Extend the grid further: 5×5 = 25 cells × 5 = 125 demos
+4. After collecting, run the conflict-swap probe — if image correlation rises above +0.5,
+   vision is starting to contribute
 
 ---
 
 ## 5. Open-Loop Execution Blindness
 
-### What it is
+### 5.1 What it is
 
-Once an action chunk is committed and sent to the robot, the policy receives
-no feedback about whether the action succeeded. If a grasp missed by 2 mm, the
-policy doesn't know — it continues executing the "lift" motion and picks up
-nothing.
+Action chunking policies commit to a sequence of actions without observing the result
+of each one. If the environment deviates — the gripper slips, the object shifts, the
+arm oscillates — the policy has no mechanism to detect this and continues executing the
+pre-planned chunk regardless.
 
-### How it shows up at deployment
+This is not a training failure — it is a fundamental design property of open-loop
+execution. The policy doesn't know what it doesn't know.
 
-Clean reach-close-lift motion with the gripper closing on empty air. This is
-exactly what was observed on the FR5.
+### 5.2 The gripper feedback problem specifically
 
-### FR5 evidence (VRworking version)
+The most critical place to lack feedback is the grasp. The sequence is:
 
-The VRworking repo had `state_dim=6` — no gripper state in the observation.
-The policy executed 100 actions (3.3 seconds) open-loop with no gripper
-position feedback. If the grasp failed, the lift proceeded anyway.
+```
+1. Reach (arm moves toward object)
+2. Close gripper (gripper command sent)
+3. Lift (arm moves upward)
+```
 
-Compounded by the proprioceptive shortcut: the reach was already going to the
-wrong location, so even with closed-loop gripper feedback the grasp would fail.
+If step 2 fails (gripper closed on empty air), step 3 executes anyway and lifts nothing.
+The policy has no signal that the grasp failed. Without `gripper_norm` in the
+observation, the policy at step 3 doesn't even know whether its own gripper is open or
+closed.
 
-### Fix
+### 5.3 FR5 evidence
 
-- Add gripper state to observation (done — state_dim=7 now includes
-  `gripper_norm`)
-- Tactile / force feedback to detect grasp success before lifting
-- A grasp-success check (gripper closed past threshold?) gating the lift phase
-- Closed-loop replanning: if `gripper_norm < threshold` after "grasp" step,
-  re-execute the grasp approach
+The VRworking version had `state_dim=6` — no gripper state in the observation. The
+policy executed 100 actions (3.3 seconds) open-loop. If the grasp failed, the lift
+proceeded. The result: robot executes a perfect-looking grasp motion, lifts its arm,
+and holds nothing.
+
+This session's fix: `state_dim=7` now includes `gripper_norm` (current gripper opening,
+0=closed, 1=open). The policy now observes its own gripper state and can condition on
+it at every replanning step.
+
+### 5.4 Residual problem after the fix
+
+Even with `gripper_norm` in the observation:
+- ACT's temporal ensembling re-plans every tick, so the policy *does* see the gripper
+  state before each action chunk
+- But if the shortcut is active (§1), it may not use the gripper observation correctly
+- Force/tactile feedback would provide a more reliable grasp-success signal
+
+### 5.5 Fix, ordered by cost
+
+| Fix | Difficulty | What it gives |
+|---|---|---|
+| Add `gripper_norm` to obs | Done | Policy can observe own gripper state |
+| Grasp-success gate | Low | After "close" command: if `gripper_norm > 0.5` after 200ms, abort and retry |
+| Temporal ensembling (ACT) | Already on | Re-plans every 33ms, partially closes the loop |
+| Force/torque sensing | Medium hardware | Detect contact, slip, load |
+| Tactile sensor (finger pads) | High hardware | Rich contact signal |
 
 ---
 
-## 6. Summary Table — FR5 Failure Mode Audit
+## 6. Action Space Design Failures
 
-| Failure mode | In literature since | Did FR5 hit it? | Severity | Primary fix |
+### 6.1 Absolute vs relative actions
+
+The action space design has a major impact on how well BC generalizes.
+
+**Absolute joint angles** (what FR5 uses currently): the action a_t is the target joint
+configuration in degrees. This is easy to implement and accurate to execute. But it has
+a critical property: *the absolute value is tightly coupled to the workspace location*.
+If the policy predicts `J1=45°` it means "reach to this specific position in the room,"
+not "reach 10° to the right of where I am."
+
+This coupling makes absolute actions a strong shortcut amplifier. The policy can memorize
+"from home pose, the grasp is at J1=52°, J2=−30°, ..." — pure proprioceptive
+autoregression with no vision required.
+
+**Relative actions** (delta joint angles or delta EEF position): the action a_t is the
+*change* from the current state. A_t = q_{t+1} - q_t. This breaks the coupling: the
+same relative action "move forward 3cm" is valid from many starting positions, so the
+policy must use vision to determine *which* relative action to take at each step.
+
+Zhao et al. 2025 specifically attributes part of their generalization improvement to
+relative EEF action space, combined with state-free observation.
+
+### 6.2 FR5 evidence
+
+The FR5 policies use absolute joint angle targets. Combined with the proprioceptive
+shortcut, this creates a particularly tight shortcut loop:
+
+```
+obs: q_home (fixed) → predict: q_grasp (memorized) → action: go to q_grasp
+```
+
+No vision required at any step. Switching to delta actions would partially break this
+because the policy can no longer directly output a memorized absolute target.
+
+### 6.3 Fix
+
+- Switch to delta joint angles: `a_t = q_{t+1} - q_t` instead of `a_t = q_{t+1}`
+- Or switch to delta EEF pose in Cartesian space: `a_t = [Δx, Δy, Δz, Δrx, Δry, Δrz]`
+- EEF delta is more interpretable and generalizes better across object heights
+
+---
+
+## 7. Observation Space Design Failures
+
+### 7.1 Camera placement and occlusion
+
+The wrist-mounted camera (D405) is critical for close-range grasping but has two
+structural problems:
+
+1. **Self-occlusion:** the gripper fingers block the view of the object at close range.
+   At the exact moment the gripper closes, the camera can't see the object anymore.
+   The policy must predict the grasp from a frame where the target is occluded.
+
+2. **Viewpoint change during reach:** as the arm moves, the wrist camera's viewpoint
+   changes continuously. The visual features at the start of the reach (t=0) are
+   completely different from those at the grasp (t=T). The policy must track this
+   viewpoint shift across the entire trajectory. With 54 demos, that's not enough
+   visual diversity to learn a stable object representation across all approach angles.
+
+The scene camera (D435i) provides a fixed viewpoint and is better for high-level
+positioning, but lower resolution for fine manipulation.
+
+### 7.2 Temporal context
+
+ACT uses only the current observation — no history. But many manipulation situations
+are ambiguous from a single frame:
+
+- Is the gripper opening or closing? (can't tell from one frame)
+- Is the arm still moving or stopped? (velocity is invisible in a single frame)
+- Did the grasp succeed? (object may be occluded immediately after grasping)
+
+Policies that receive a history of recent observations (a stack of the last k frames,
+or a recurrent hidden state) can resolve these ambiguities. ACT's CVAE partially
+compensates by encoding the entire demonstration history into z during training, but
+z=0 at inference means this history is not available at deploy time.
+
+### 7.3 Image resolution and crop
+
+A 224×224 image covers the full scene. If the object is small (e.g. a 3cm cube at
+50cm distance), it occupies roughly 20×20 pixels — about 0.8% of the total image area.
+The ResNet18 features must localize this tiny region among 150K input pixels. With
+limited demos, the network may never learn to reliably localize small objects because
+the gradients from that 0.8% are swamped by the rest of the image.
+
+Fix: crop the image to the region of interest (RoI) before feeding to ResNet, or use
+a higher-resolution camera for fine manipulation.
+
+### 7.4 FR5 evidence
+
+The scene camera + wrist camera combination is well-designed in principle. The issues
+are:
+
+- Wrist camera self-occlusion during grasp closing (unavoidable without redesign)
+- 54 demos insufficient to learn stable visual features across approach angles
+- No image crop or RoI — full 224×224 frames fed to ResNet
+
+---
+
+## 8. Dataset Bias and Operator-Specific Behavior
+
+### 8.1 Operator fingerprints
+
+Each human operator has characteristic movement patterns: preferred approach angles,
+velocity profiles, wrist rotation tendencies, grasp styles. If all demos are recorded
+by one operator (or two operators with similar styles), the policy learns that operator's
+*style*, not the *task*.
+
+At deploy time, the policy will reproduce the operator's style regardless of whether it
+is appropriate for the current object position. This is a subtle form of causal
+confusion: the policy learned to imitate the person, not to solve the task.
+
+### 8.2 Demonstration quality variance
+
+Not all demonstrations are equally good. A tired or distracted operator may produce
+demos with:
+
+- Corrective sub-motions (hesitation, small back-and-forth)
+- Non-smooth trajectories that look like noise to the policy
+- Inconsistent grasp heights across the dataset
+
+BC treats all demos equally. A dataset with 10 excellent demos and 40 inconsistent ones
+may perform worse than a dataset with 40 consistently good demos.
+
+### 8.3 FR5 evidence
+
+The demos were recorded by a single operator (Vivek, from the VRworking context). The
+operator's tendency to start near the object (creating the start-pose correlation)
+is itself an operator-specific behavior. A different operator with a "home first, then
+approach" style would not have created the same shortcut.
+
+### 8.4 Fix
+
+- **Multiple operators** recording demos, or at least one operator using a consistent
+  and principled approach style
+- **Demo quality filter:** throw out demos where the task failed or where the trajectory
+  is clearly inconsistent (high jerk, grasp missed, etc.)
+- **Standardize approach:** define a fixed approach direction and stick to it across all
+  recordings
+
+---
+
+## 9. How All Failures Interact — the FR5 Compounding Chain
+
+The failure modes don't operate in isolation. On the FR5, all five active modes
+amplified each other:
+
+```
+DATA COLLECTION (54 demos, operator starts near object)
+    │
+    ├─► [§1] Proprioceptive shortcut forms
+    │         (start-pose corr=0.45 → state predicts grasp → vision ignored)
+    │
+    ├─► [§4] Data insufficiency: workspace uncovered
+    │         (vision has insufficient diversity to build reliable features)
+    │
+    │   At deployment:
+    │
+    ├─► [§1] Constant home pose → same average reach every time
+    │
+    ├─► [§5] Reach goes to wrong location → gripper closes on air
+    │         (no gripper feedback in VRworking version)
+    │
+    └─► [§2] 3.3s open-loop execution → errors compound with T²
+              robot has never been trained on the post-grasp-failure state
+              → produces incoherent recovery actions → "absolute nuts"
+```
+
+The occasional success: when the object happened to be placed near the "average"
+location that the shortcut predicts (~the same area the operator tended to use),
+the policy worked. When the object was elsewhere, it failed completely.
+
+This is why **fixing one mode while leaving others active rarely produces reliable
+behavior.** The system needs all the active failure modes addressed simultaneously.
+
+---
+
+## 10. Diagnostic Guide — How to Tell Which Mode You're In
+
+Before collecting more data or retraining, run these checks to identify which failure
+modes are active.
+
+### 10.1 Conflict-swap probe (causal confusion test)
+
+```python
+# Take state from episode i, image from episode j (different object position)
+# Run policy, measure where the reach goes
+# If reach follows state_i: shortcut active
+# If reach follows image_j: vision is being used
+action_swap = policy(state=ep_i.state, image=ep_j.image)
+corr_with_state = pearsonr(action_swap, ep_i.expert_action)
+corr_with_image = pearsonr(action_swap, ep_j.expert_action)
+```
+
+| Result | Diagnosis |
+|---|---|
+| `corr_state > 0.7` | Shortcut active (§1) |
+| `corr_image > 0.7` | Vision is working |
+| Both low | Mode averaging or high variance |
+
+### 10.2 Ablation ratio (relative importance test)
+
+```python
+Δ_image = ||action(full_obs) - action(blanked_camera)||
+Δ_state = ||action(full_obs) - action(mean_state)||
+ratio = Δ_state / Δ_image
+```
+
+| Ratio | Diagnosis |
+|---|---|
+| >3× | State dominates → shortcut active (§1) |
+| ~1× | Balanced use of both inputs |
+| <0.5× | Vision dominates → healthy or shortcut-free |
+
+### 10.3 Rollout timeline analysis
+
+Record the exact step where the rollout first diverges from the expected trajectory:
+
+| Divergence point | Diagnosis |
+|---|---|
+| From step 1 | Wrong reach direction → shortcut (§1) or mode collapse (§3) |
+| After first chunk (~300ms) | Covariate shift kicking in (§2) |
+| After grasp attempt | Open-loop blindness / grasp failure (§5) |
+| Random, no pattern | Data coverage gaps (§4) or multimodal instability (§3) |
+
+### 10.4 Training vs validation loss gap
+
+| Gap | Diagnosis |
+|---|---|
+| Val loss ≈ Train loss, both high | Underfitting (not enough capacity or training) |
+| Val loss >> Train loss | Overfitting to demo style (§8) |
+| Val loss ≈ Train loss, both low, but deploy fails | Shortcut (§1) — metric doesn't capture it |
+| Bigger model doesn't lower val loss | Data bottleneck (§4), not capacity |
+
+---
+
+## 11. Prioritized Remediation Plan for FR5
+
+Ordered by impact-per-effort. Do these in sequence, not all at once — each fix has a
+measurable test, so you can confirm it worked before adding the next.
+
+### Phase 1: Fix the data (highest impact, must do first)
+
+1. **Set a fixed home position for every recording.** The robot must start from exactly
+   the same joint configuration before every demo. This breaks `corr(start, grasp)`.
+2. **Define a 4×4 workspace grid** and place the object at each grid position across
+   recordings. 4–5 demos per cell = 64–80 demos with guaranteed workspace coverage.
+3. **Validate with the shortcut probe.** After retraining: if `corr_image > 0.5` in the
+   conflict swap, the fix is working. If `corr_state` is still dominant, collect more demos.
+
+Expected outcome: shortcut ratio drops from 5× toward 1–2×, image correlation rises.
+
+### Phase 2: Architecture and training changes (add after Phase 1)
+
+4. **Proprioception dropout 20–30%.** Add to the training loop.
+5. **Verify `state_dim=7`** is active (gripper in observation). Already done in this
+   session — confirm configs and model defaults.
+6. **Consider relative action space.** Implement delta joint angles and retrain — this
+   removes the absolute-position shortcut.
+
+### Phase 3: Inference changes (add after Phase 2)
+
+7. **Grasp-success gate.** After the "close gripper" step: check `gripper_norm`. If
+   `gripper_norm > 0.5` after 200ms (gripper is open = missed), abort and retry the
+   approach from 5cm above.
+8. **Temporal ensembling** (ACT only — already implemented). Confirm `m=0.01` is being
+   used so re-planning happens every tick.
+
+### Phase 4: Structural improvements (if Phase 1–3 still insufficient)
+
+9. **State-free policy.** Remove proprioceptive state input entirely and retrain.
+   Only attempt this after the data coverage (Phase 1) is fixed — a vision-only policy
+   on sparse data is worse than a shortcut model.
+10. **Delta EEF action space.** Move from joint angles to delta Cartesian EEF pose.
+    More generalizable and less coupled to absolute position.
+11. **Image cropping / RoI.** Crop to the workspace region before passing to ResNet to
+    reduce background memorization and improve object localization.
+
+---
+
+## 12. Summary Audit Table
+
+| Failure mode | In literature since | FR5 hit it? | Severity | Status |
 |---|---|---|---|---|
-| Causal confusion / proprioceptive shortcut | de Haan 2019 | **Yes — confirmed by probes** | High | Fixed home + varied object + dropout |
-| Covariate shift / compounding errors | Ross 2010 (DAgger) | **Yes — "went absolute nuts"** | High | Shorter chunks, more demos, DAgger |
-| Mode averaging | — | Partial | Low-Med | ACT CVAE / diffusion handles this |
-| Data insufficiency | Community consensus | **Yes — 54 demos** | High | 100–150+ demos |
-| Open-loop execution blindness | — | **Yes — 3.3s open-loop, no gripper fb** | High | gripper_norm in obs (done), tactile |
+| Causal confusion / proprioceptive shortcut | de Haan 2019 | **Yes — probes confirm** | Critical | Partially fixed (state_dim=7, dropout added to config); data fix needed |
+| Covariate shift / compounding errors | Ross 2010 (DAgger) | **Yes — "went absolute nuts"** | High | Partially mitigated by temporal ensembling; DAgger not done |
+| Mode averaging / collapse | — | Partial | Low | Handled by ACT CVAE |
+| Data insufficiency + coverage gaps | Community consensus | **Yes — 54 demos** | Critical | Not fixed — needs new data collection |
+| Open-loop execution blindness | — | **Yes — 3.3s, no gripper fb** | High | gripper_norm added to obs; grasp gate not implemented |
+| Absolute action space coupling | Zhao 2025 | Active | Medium | Not addressed yet |
+| Operator-specific bias | — | Likely | Medium | Not addressed yet |
 
-All five failure modes were active simultaneously on the FR5. The proprioceptive
-shortcut is the most measurable and the most clearly confirmed — but it is
-sitting on top of a data insufficiency problem, and both are compounded by
-open-loop execution.
-
-The fixes are ordered: **data first** (fixed home, varied object, 100+ demos),
-then **architecture** (dropout, gripper in obs), then **inference** (shorter
-chunks, closed-loop gating). Fixing only one layer while leaving the others
-active is unlikely to produce reliable pick-place behavior.
+All critical failures (shortcut + data coverage) must be fixed before the policy can
+generalize reliably. The other modes can be addressed incrementally.
 
 ---
 
@@ -273,9 +712,14 @@ active is unlikely to produce reliable pick-place behavior.
   https://arxiv.org/abs/1905.11979
 - Ross, Gordon, Bagnell — "A Reduction of Imitation Learning and Structured Prediction
   to No-Regret Online Learning" — AISTATS 2011 (DAgger)
+  https://arxiv.org/abs/1011.0686
 - Zhao et al. — "Do You Need Proprioceptive States in Visuomotor Policies?" — 2025
   https://arxiv.org/abs/2509.18644
 - Ma et al. — "Causal Diffusion Policy" (CDP) — PMLR 2025
   https://proceedings.mlr.press/v305/ma25c.html
+- Chi et al. — "Diffusion Policy: Visuomotor Policy Learning via Action Diffusion"
+  RSS 2023 · https://arxiv.org/abs/2303.04137
 - Zhao et al. — "Learning Fine-Grained Bimanual Manipulation with Low-Cost Hardware"
-  (ACT paper) — RSS 2023
+  (ACT paper) — RSS 2023 · https://arxiv.org/abs/2304.13705
+- "Shortcut Learning in Generalist Robot Policies" — 2024
+  (Open X-Embodiment shortcut analysis)

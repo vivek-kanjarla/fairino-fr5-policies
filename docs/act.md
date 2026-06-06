@@ -871,7 +871,131 @@ forward pass plus a lightweight latent.
 
 ---
 
-## 11. When to use ACT (and when not to)
+## 11. The proprioceptive shortcut — a real failure mode to know about
+
+### 11.1 What proprioception means
+
+**Proprioception** = the robot's sense of its own body. From Latin: *proprius* ("one's own") +
+*ception* ("sensing"). In biology it's how you can touch your nose with your eyes closed —
+your joints and muscles have sensors that tell your brain where your limbs are without needing
+vision.
+
+In the FR5:
+
+```
+biological proprioception         robot proprioception
+──────────────────────────        ────────────────────
+muscle / joint angle sensors  →   joint encoders  (fr5_actual_j1..j6)
+finger position               →   gripper_norm    [0,1]
+sense of hand location        →   eef_pose        (x,y,z,rx,ry,rz)
+```
+
+The observation state `(7,)` we feed the policy is **pure proprioception** — it tells the
+policy where the arm already is, with no information about where the object is. That comes
+from the cameras.
+
+### 11.2 The shortcut — when the model ignores the cameras entirely
+
+A **proprioceptive shortcut** (also called *causal confusion*) is when the network learns to
+predict actions almost entirely from the robot's own state and effectively **ignores the
+cameras**. It fits the training data perfectly and fails completely at deployment.
+
+**Why gradient descent takes this shortcut:**
+
+Predicting the action from 7 clean numbers (joint angles + gripper) is a trivial regression.
+Extracting the object's position from a 224×224 RGB image requires the ResNet to learn
+detection-like features — far more capacity, far more gradient signal. Gradient descent is
+lazy: **if the state alone gets the loss low, it never has to solve vision.**
+
+**The start-pose leak — why it happened on the FR5:**
+
+In practice, operators tend to start the arm near the object before recording. This means the
+*initial joint configuration is correlated with the grasp location*:
+
+```
+corr(start-pose J1, grasp J1) ≈ 0.45
+```
+
+The joint state at t=0 already half-predicts where the grasp will be. The model only needs to
+learn "continue from where I already am" — a proprioceptive autoregression — instead of "find
+the object with the camera." Loss drops, vision is never needed.
+
+**The deploy-time consequence:**
+
+```
+TRAIN:   varied start poses  →  state predicts grasp  →  low loss, cameras ignored
+DEPLOY:  fixed home pose     →  state is the same every time
+                             →  model reaches the same averaged spot every time
+                             →  grasps mid-air if the object isn't exactly there
+```
+
+The motion looks correct (reach, close, lift) — the robot just goes to the wrong place.
+
+### 11.3 The evidence — causal intervention probes
+
+This was proven by intervening on the inputs at inference (not just looking at val loss):
+
+| Test | What it does | Result |
+|---|---|---|
+| **Image ablation** | blank the cameras, keep state | action barely changes (~5°) |
+| **State ablation** | replace state with dataset mean, keep images | action changes **3.6–5.2× more** |
+| **Conflict swap** | feed state from episode i + image from episode j | action follows **state** (corr +0.85), not image (corr −0.14) |
+
+The conflict swap is decisive. When proprioception and the camera point at different object
+locations, the action follows the state every time. The camera is overridden.
+
+### 11.4 Adding more proprioception makes it worse
+
+Counterintuitively, adding richer state (joints + eef pose + gripper = 13-D) made the
+shortcut **stronger** — more proprioception to lean on, less reason to learn vision:
+
+| model | state dim | state ablation Δ | image ablation Δ | ratio | follows state |
+|---|---|---|---|---|---|
+| ACT paper-scale | 6 | 26.4° | 5.0° | 5.2× | +0.85 |
+| Diffusion v1 | 6 | 19.7° | 5.0° | 4.0× | +0.85 |
+| Diffusion v2 (rich) | 13 | 18.8° | 5.2° | 3.6× | **+0.88** |
+
+This is causal confusion theory in action: more state channels = more signal to latch onto =
+less reason to learn the harder vision pathway. Note: **adding a second camera also didn't
+help** — a model that chooses to ignore one camera ignores two.
+
+### 11.5 The fixes that actually work
+
+The fixes that **don't** work: bigger model, more layers, second camera, adding eef/gripper
+to state, training longer. All of these either don't break the shortcut or actively strengthen
+it.
+
+**The fixes that do work:**
+
+**1. Break the start-pose/grasp correlation in the data.** Record with a **fixed arm-home
+start** and a **widely varied object position**. Now the start state carries zero information
+about the grasp — the only way to lower the loss is to use the cameras. This is the most
+important fix.
+
+**2. More demonstrations (~100–150 minimum).** Enough diversity that the vision pathway
+becomes worth learning. With ~54 episodes there isn't enough pressure for the harder vision
+pathway to beat the cheap state pathway.
+
+**3. Proprioception dropout (training-side).** Randomly zero the entire state vector with
+probability `p` during training:
+
+```python
+# in dataset.py / train.py — training only, off at eval/deploy
+if train and random() < proprio_dropout:
+    state = torch.zeros_like(state)
+```
+
+This directly attacks the shortcut: the loss can no longer be driven purely by state, so the
+vision pathway is forced to contribute. At deploy, dropout is off and you use the full state.
+Each of these fixes is verifiable with the same conflict-swap probe — a successful fix should
+push the image correlation up and the state correlation down toward 1×.
+
+**In one sentence:** the shortcut is a property of what minimizes the loss on *this* data, so
+the fix must change the data or the loss — not the model size or the number of cameras.
+
+---
+
+## 12. When to use ACT (and when not to)
 
 **Use ACT when:**
 - You want the **simplest, fastest-to-deploy** learned policy and a strong baseline before

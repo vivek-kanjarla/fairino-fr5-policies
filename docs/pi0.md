@@ -350,7 +350,7 @@ figure; treat it as illustrative):
 
 - **Image tokens**: ~256 (one 224×224 wrist image, patchified by SigLIP).
 - **Text tokens**: up to **48** (`tokenizer_max_length = 48`), e.g. for "pick up the block".
-- **State token**: the 6-DOF FR5 joint state, padded to width 32, projected to **1** token.
+- **State token**: the 7-D FR5 state (6 joints + current gripper), padded to width 32, projected to **1** token.
 - **Action tokens**: **50** (`chunk_size = 50`) — one token per future timestep in the chunk;
   each carries that timestep's 7-dim action, padded to width 32.
 
@@ -516,9 +516,9 @@ steps so it covers `50 / 30 ≈ 1.67 seconds` of motion.
 - Camera frame: 640×480 RGB. The pipeline resizes/crops it to **224×224** for SigLIP, with
   pixel values in `[0,1]`; the model rescales internally to `[-1,1]`.
 - Instruction string: `"pick up the block"`.
-- Robot state: 6 joint angles in degrees, e.g. `s = [12.0, -30.0, 45.0, 0.0, 60.0, -15.0]`.
-  Note: the pipeline passes state as shape `(B, 6)` (just batch × state_dim). The model adds
-  the sequence dimension internally — you do **not** hand it a `(B, 1, 6)`.
+- Robot state: 6 joint angles (deg) + current gripper [0,1], e.g. `s = [12.0, -30.0, 45.0, 0.0, 60.0, -15.0, 0.8]`.
+  Note: the pipeline passes state as shape `(B, 7)` (just batch × state_dim). The model adds
+  the sequence dimension internally — you do **not** hand it a `(B, 1, 7)`.
 
 **Step-by-step:**
 
@@ -528,8 +528,8 @@ steps so it covers `50 / 30 ≈ 1.67 seconds` of motion.
 2. **Text → text tokens.** `"pick up the block"` → tokenizer → a handful of integer IDs,
    padded to length `tokenizer_max_length = 48` → embedded to 48 vectors. *(prefix part 2)*
 
-3. **State → state token.** `s` has 6 numbers → pad to width `max_state_dim = 32`:
-   `[12, -30, 45, 0, 60, -15, 0, 0, ..., 0]` → project to **1** state token vector.
+3. **State → state token.** `s` has 7 numbers → pad to width `max_state_dim = 32`:
+   `[12, -30, 45, 0, 60, -15, 0.8, 0, ..., 0]` → project to **1** state token vector.
    *(suffix part 1)*
 
 4. **Action chunk → action tokens.** A clean chunk for training is `a_clean` shape
@@ -689,7 +689,7 @@ standard PaliGemma/illustrative value rather than a config knob, it is marked.
 **Robot / sensors:**
 
 - Robot: **Fairino FR5**, a **6-DOF** (6 degrees of freedom) arm.
-- **State** = **6** values: the 6 joint angles, in **degrees**.
+- **State** = **7** values: 6 joint angles (degrees) + current gripper opening [0,1].
 - **Action** = **7** values: **6 joint targets + 1 gripper** command.
 - Wrist camera: Intel RealSense **D405**, native **640×480**, resized to **224×224** for
   SigLIP.
@@ -705,7 +705,7 @@ standard PaliGemma/illustrative value rather than a config knob, it is marked.
 - `tokenizer_max_length = 48` — max text tokens for the instruction.
 - `num_inference_steps = 10` — Euler steps in the flow-matching ODE loop.
 - Images supplied in **`[0,1]`**, mapped internally to **`[-1,1]`** for SigLIP.
-- State is passed as shape **`(B, state_dim) = (B, 6)`**; the model adds the sequence
+- State is passed as shape **`(B, state_dim) = (B, 7)`**; the model adds the sequence
   dimension internally.
 
 **Operational requirements:**

@@ -11,7 +11,7 @@ dataset:
   val_frac: 0.5            # only 2 episodes -> 1 train / 1 val
 
 model:
-  state_dim: 6
+  state_dim: 7
   action_dim: 7
   latent_dim: 8
   d_model: 64

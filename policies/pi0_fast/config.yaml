@@ -18,7 +18,7 @@ dataset:
   aug_level: "crops"
 
 model:
-  state_dim: 6
+  state_dim: 7
   action_dim: 7
   max_state_dim: 32
   max_action_dim: 32

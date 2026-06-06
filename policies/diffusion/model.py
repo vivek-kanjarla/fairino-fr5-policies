@@ -47,7 +47,7 @@ ACTION_KEY = "action"
 
 @dataclass
 class DPConfig:
-    state_dim:  int  = 6
+    state_dim:  int  = 7
     action_dim: int  = 7
     chunk_size: int  = 16    # horizon — U-Net predicts this many action steps
     use_image:  bool = True

@@ -54,7 +54,7 @@ CODEBASE_VERSION = "v3.0"
 FPS = 30  # policy control rate; matches the camera, not the CSV
 
 # CSV column -> dataset feature mapping
-STATE_COLS = [f"fr5_actual_j{i}" for i in range(1, 7)]          # observation.state (6)
+STATE_COLS = [f"fr5_actual_j{i}" for i in range(1, 7)] + ["gripper_norm"]  # observation.state (7)
 CMD_COLS = [f"fr5_cmd_j{i}" for i in range(1, 7)]               # action joints (6)
 GRIPPER_COL = "gripper_norm"                                    # action[6]
 EEF_COLS = ["fr5_eef_x_mm", "fr5_eef_y_mm", "fr5_eef_z_mm",

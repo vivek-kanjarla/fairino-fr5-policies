@@ -62,7 +62,7 @@ _CLIP_STD  = torch.tensor([0.26862954, 0.26130258, 0.27577711]).view(3, 1, 1)
 
 @dataclass
 class DiTFlowConfig:
-    state_dim:  int  = 6
+    state_dim:  int  = 7
     action_dim: int  = 7
     chunk_size: int  = 32         # horizon == n_action_steps
     use_image:  bool = True

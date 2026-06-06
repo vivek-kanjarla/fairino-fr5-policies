@@ -9,7 +9,7 @@ dataset:
   val_frac: 0.1
 
 model:
-  state_dim: 6
+  state_dim: 7
   action_dim: 7
   n_action_steps: 8       # steps executed per chunk (chunk_size / 2)
 

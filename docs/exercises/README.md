@@ -55,6 +55,6 @@ repo's policies. Cross-references to your existing work:
 ## notes
 - everything runs on CPU in seconds — no GPU, no lerobot, no dataset needed.
 - shapes follow the FR5 convention: action chunks are `(B, T, 7)` (6 joints + gripper),
-  state is 6-dim, matching the rest of the repo.
+  state is 7-dim (6 joints + current gripper), matching the rest of the repo.
 - the solutions are the *minimal* correct version; your own implementation may look
   different and still pass (the checks test behavior, not code).

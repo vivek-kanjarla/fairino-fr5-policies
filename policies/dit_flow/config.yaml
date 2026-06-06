@@ -13,7 +13,7 @@ dataset:
   val_frac: 0.1
 
 model:
-  state_dim: 6
+  state_dim: 7
   action_dim: 7
 
   # flow matching (set to "diffusion" + noise_scheduler: DDIM for DDIM baseline)

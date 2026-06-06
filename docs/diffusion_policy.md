@@ -479,7 +479,7 @@ OBSERVATION                                        NOISY ACTION CHUNK
   │     │  → feature maps                                │
   │   Spatial Softmax → keypoint coords                  │
   │     │                                                │
-  ├─ joint state (B, 6)                                  │
+  ├─ state (B, 7)  [6 joints + gripper]                  │
   │     │                                                │
   │   Linear projection                                  │
   │     │                                                │
@@ -502,7 +502,7 @@ OBSERVATION                                        NOISY ACTION CHUNK
 ```
 
 - **Image path.** The 640×480 wrist image is resized to **224×224** (ResNet18's expected input), then run through ResNet18 → **spatial softmax** → a short list of keypoint coordinates.
-- **State path.** The 6 joint angles go through a **linear layer** (a learned matrix multiply + bias) to a feature vector.
+- **State path.** The 7-D state (6 joint angles + current gripper) goes through a **linear layer** (a learned matrix multiply + bias) to a feature vector.
 - **Timestep path.** The diffusion step `k` is turned into a vector via a **sinusoidal embedding** (the same trick transformers use for position: encode an integer as a set of sine/cosine waves at different frequencies, giving the net a smooth, distinguishable representation of "how noisy is this"), then passed through a small **MLP** (Multi-Layer Perceptron = a stack of linear layers with nonlinearities). `diffusion_step_embed_dim = 128`.
 - **The U-Net** processes the action chunk `(B,16,7)` as a 16-long, 7-channel 1-D signal, downsampling along time, then upsampling back, with skip connections, outputting predicted noise of the *same shape* `(B,16,7)`.
 
@@ -542,7 +542,7 @@ Tracing one **training** forward pass with full-scale batch size 64:
 | U-Net output | `ε̂` | `(64, 16, 7)` | predicted noise |
 | Loss | scalar | `()` | `mean((ε̂ − ε)²)` |
 
-At **inference** (`predict`), `n_obs_steps = 1` and the lerobot **action queue** handles the extra time dimension; state arrives `(B, 6)`, image `(B, 3, 224, 224)`, and after 10 DDIM steps the policy returns one action `(B, 7)` per call (in original joint units after un-normalization).
+At **inference** (`predict`), `n_obs_steps = 1` and the lerobot **action queue** handles the extra time dimension; state arrives `(B, 7)`, image `(B, 3, 224, 224)`, and after 10 DDIM steps the policy returns one action `(B, 7)` per call (in original joint units after un-normalization).
 
 ---
 
@@ -660,7 +660,7 @@ dataset:
   image_size: [224, 224]  # wrist D405 frame resized for ResNet18
 
 model:
-  state_dim: 6            # 6 joint angles (degrees)
+  state_dim: 7            # 6 joint angles (degrees) + current gripper [0,1]
   action_dim: 7           # 6 joint targets (deg) + 1 gripper command (0–1)
   n_action_steps: 8       # execute 8 of the 16 (receding horizon), then re-predict
 

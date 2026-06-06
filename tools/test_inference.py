@@ -29,7 +29,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "common"))
 
 ACTION_DIM = 7
-STATE_DIM  = 6
+STATE_DIM  = 7   # 6 joint angles (deg) + current gripper opening [0,1]
 N_STEPS    = 30   # simulate 1-second episode @ 30 Hz
 
 

@@ -14,7 +14,7 @@ dataset:
   aug_level: "crops"      # crops only — pi0 uses SigLIP norm internally
 
 model:
-  state_dim: 6
+  state_dim: 7
   action_dim: 7
 
   # pi0 architecture (must match PaliGemma variant)

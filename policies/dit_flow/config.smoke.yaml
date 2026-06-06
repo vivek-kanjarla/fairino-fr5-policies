@@ -13,7 +13,7 @@ dataset:
   val_frac: 0.5
 
 model:
-  state_dim: 6
+  state_dim: 7
   action_dim: 7
   objective: "flow_matching"
   num_integration_steps: 2    # minimal ODE steps for speed

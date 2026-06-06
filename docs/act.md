@@ -43,8 +43,12 @@ of independent joints that can move. So the arm has 6 rotating joints, plus a gr
 "hand" that opens and closes).
 
 **The observation** (what the policy sees at one instant in time):
-- **State** = the 6 *actual* joint angles, measured in **degrees**. This is a vector of 6
-  numbers, e.g. `[12.3, -45.0, 90.1, 0.0, 30.0, -10.0]`. We call its size `state_dim = 6`.
+- **State** = the 6 *actual* joint angles in **degrees** plus the *current gripper opening* [0,1].
+  This is a vector of **7 numbers**, e.g. `[12.3, -45.0, 90.1, 0.0, 30.0, -10.0, 0.8]`.
+  We call its size `state_dim = 7`. Including the current gripper state matches what the ACT
+  paper does (bimanual ALOHA: 14-D = 6 joints + 1 gripper per arm × 2), and means the policy
+  has explicit closed-loop feedback about whether the gripper is open or closed — not just what
+  it can infer from the image.
 - **Image** = one RGB frame from a wrist-mounted **Intel RealSense D405** camera. *Wrist-mounted*
   means the camera is bolted near the gripper and moves with it. The native frame is
   640×480 pixels, but before the network sees it the frame is **resized to 224×224**. *RGB*
@@ -360,7 +364,7 @@ yields **sharper, more precise** actions — important for fine manipulation.
 
 Notation: `B` = **batch size** (how many examples processed at once; `batch_size = 8` here),
 `d_model` = the transformer's internal width (`512` in `config.yaml`, `256` in
-`config.local.yaml`), `chunk_size = 100`, `latent_dim = 32`, `state_dim = 6`, `action_dim = 7`.
+`config.local.yaml`), `chunk_size = 100`, `latent_dim = 32`, `state_dim = 7`, `action_dim = 7`.
 
 ### 5.1 Training-time data flow (the CVAE encoder is active)
 
@@ -371,7 +375,7 @@ Notation: `B` = **batch size** (how many examples processed at once; `batch_size
    ground-truth action chunk            current observation
    actions (B, 100, 7)                  ┌─────────────────────────────┐
         │                               │ image (B, 3, 224, 224)      │
-        │                               │ state (B, 6)                │
+        │                               │ state (B, 7)                │
         ▼                               └─────────────────────────────┘
  ┌──────────────────┐                              │
  │  CVAE  ENCODER    │                   ResNet18  │  state
@@ -421,7 +425,7 @@ training** — it's the part that "cheats" by looking at the answer to summarize
 - The `(B, 3, 224, 224)` image goes through **ResNet18** → a spatial feature grid → flattened
   into ~49 tokens, each projected to `d_model`. **Sinusoidal positional encodings** are added so
   the transformer knows where each patch sits in the image.
-- The `(B, 6)` joint state is linearly embedded into one token of size `d_model`.
+- The `(B, 7)` state (6 joints + gripper) is linearly embedded into one token of size `d_model`.
 - These tokens are fed through the **transformer encoder** (`num_encoder_layers = 4`), whose
   self-attention fuses image and proprioceptive ("proprioception" = sense of one's own joint
   positions) information into a context representation called the **memory**.
@@ -442,7 +446,7 @@ in parallel** (one-shot). Depth is `num_decoder_layers` — **7** in `config.yam
 
    current observation                       z = 0  (the prior mean, B×32 of zeros)
    image (B, 3, 224, 224)                       │  embed to token
-   state (B, 6)                                 │
+   state (B, 7)                                 │
         │                                       │
    ResNet18 + state-embed                       │
         │                                       │
@@ -531,7 +535,7 @@ Let's trace **one** training example through ACT with concrete shapes. We'll use
 
 **Inputs for one batch:**
 - image: `(8, 3, 224, 224)` — 8 wrist frames, ImageNet-normalized.
-- state: `(8, 6)` — 8 sets of 6 joint angles (deg), then normalized to mean-0/std-1 using dataset
+- state: `(8, 7)` — 8 observations of 6 joint angles (deg) + current gripper [0,1], normalized to mean-0/std-1 using dataset
   stats (the wrapper's `_norm_state`).
 - ground-truth action chunk: `(8, 100, 7)` — the 100 future actions per example, normalized via
   `_norm_action`. Also a pad mask `(8, 100)`.
@@ -612,7 +616,7 @@ From `policies/act/config.yaml` (paper-scale) and `config.local.yaml` (laptop) a
 
 | Setting | `config.yaml` | `config.local.yaml` | Meaning |
 |---|---|---|---|
-| `state_dim` | 6 | 6 | FR5 actual joint angles (deg) |
+| `state_dim` | 7 | 7 | 6 FR5 joint angles (deg) + current gripper [0,1] |
 | `action_dim` | 7 | 7 | 6 target joints (deg) + gripper (0–1) |
 | `chunk_size` | 100 | 100 | actions predicted per query (≈3.3 s @ 30 Hz) |
 | `d_model` | 512 | 256 | transformer width |
@@ -634,7 +638,7 @@ From `policies/act/config.yaml` (paper-scale) and `config.local.yaml` (laptop) a
 | `use_vae` | true | true | the CVAE is enabled |
 
 Fixed facts baked into `model.py`: `n_obs_steps = 1` (one observation per query — state is
-`(B, 6)`, image is `(B, 3, 224, 224)`, no extra time axis), `use_vae = True`, and normalization is
+`(B, 7)`, image is `(B, 3, 224, 224)`, no extra time axis), `use_vae = True`, and normalization is
 handled by the wrapper (state/action mean-std from dataset stats; images ImageNet-normalized in
 `dataset.py`), with lerobot told to treat every feature as `IDENTITY`.
 

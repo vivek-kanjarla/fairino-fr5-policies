@@ -477,7 +477,7 @@ information that mattered.
 
 > **Note on dims = 32 vs 7.** As in π0 (see `pi0.md`), the model architecture is
 > built for `max_state_dim = 32` and `max_action_dim = 32` so one model can serve
-> many robots. The FR5's 6 state dims and 7 action dims are padded out to 32 with
+> many robots. The FR5's 7 state dims and 7 action dims are padded out to 32 with
 > zeros; the padded coordinates are smooth constants (all zero), so they cost
 > essentially no tokens after DCT+BPE.
 
@@ -698,7 +698,7 @@ around lerobot 0.5.1's `PI0FastPolicy` (imported from
   (unlike the flow-matching policies). The wrapper calls
   `self.policy.forward(batch)` which returns `(loss, _)`, and the wrapper returns
   `(loss, loss.item(), 0.0)`. That `loss` *is* the next-token cross-entropy.
-- **State is passed as `(B, state_dim)`** — i.e. `(B, 6)` for the FR5 — with **no
+- **State is passed as `(B, state_dim)`** — i.e. `(B, 7)` for the FR5 — with **no
   sequence dimension**; the policy adds the sequence dim internally (the wrapper
   comment notes this explicitly: *"State: always (B, state_dim) — pi0_fast adds seq
   dim internally."*).
@@ -726,9 +726,9 @@ From `policies/pi0_fast/config.yaml` and `policies/pi0_fast/model.py` in this re
 | Setting | Value | Meaning |
 |---|---|---|
 | `chunk_size` | `50` | timesteps per action chunk (`T`) |
-| `state_dim` | `6` | FR5 is 6-DOF; state is 6 joint angles in degrees |
+| `state_dim` | `7` | 6 FR5 joint angles (deg) + current gripper [0,1] |
 | `action_dim` | `7` | 6 joints + 1 gripper (`D`) |
-| `max_state_dim` | `32` | architecture width; FR5's 6 padded to 32 |
+| `max_state_dim` | `32` | architecture width; FR5's 7 padded to 32 |
 | `max_action_dim` | `32` | architecture width; FR5's 7 padded to 32 |
 | `tokenizer_max_length` | `200` | max text/action token sequence length |
 | `use_kv_cache` | `true` | KV cache for fast autoregressive decode |

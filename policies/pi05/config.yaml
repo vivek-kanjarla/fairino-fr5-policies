@@ -16,7 +16,7 @@ dataset:
   aug_level: "crops"
 
 model:
-  state_dim: 6
+  state_dim: 7
   action_dim: 7
   paligemma_variant: "gemma_2b"
   action_expert_variant: "gemma_300m"

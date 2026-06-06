@@ -53,7 +53,7 @@ _TEXT_TOKENIZER = "google/paligemma-3b-pt-224"   # text side (gated)
 
 @dataclass
 class Pi0FastConfig:
-    state_dim:  int  = 6
+    state_dim:  int  = 7
     action_dim: int  = 7
     chunk_size: int  = 50
     use_image:  bool = True

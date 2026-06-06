@@ -6,7 +6,7 @@ dataset:
   val_frac: 0.1          # fraction of episodes held out for validation
 
 model:
-  state_dim: 6           # FR5 actual joint positions (deg)
+  state_dim: 7           # FR5 actual joint positions (deg)
   action_dim: 7          # 6 joints (deg) + gripper norm [0, 1]
   latent_dim: 32
   d_model: 512

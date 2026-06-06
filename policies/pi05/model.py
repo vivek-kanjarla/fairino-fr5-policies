@@ -46,7 +46,7 @@ _PALIGEMMA_TOKENIZER = "google/paligemma-3b-pt-224"
 
 @dataclass
 class Pi05Config:
-    state_dim:  int  = 6
+    state_dim:  int  = 7
     action_dim: int  = 7
     chunk_size: int  = 50
     use_image:  bool = True

@@ -640,9 +640,9 @@ generic motion. The **conditioning vector** `c` is assembled in
                                           concatenated -> ~1286 numbers  (the conditioning_dim)
 ```
 
-- **Robot state** (`observation.state`, 6 numbers): the 6 joint angles of the
-  Fairino FR5 arm, min-max normalized. Passed straight into the conditioning, no
-  encoder.
+- **Robot state** (`observation.state`, 7 numbers): the 6 joint angles of the
+  Fairino FR5 arm + the current gripper opening [0,1], min-max normalized. Passed
+  straight into the conditioning, no encoder.
 - **Image embedding** (`observation.images.wrist_cam`): the Intel RealSense D405
   wrist camera frame (native 640×480) is resized to **224×224** and renormalized
   to CLIP statistics, then fed to **CLIP ViT-B/16**. The encoder returns the
@@ -897,7 +897,7 @@ identity and learns to "turn on" blocks gradually — a key stability trick.
 **Robot & sensors (real numbers, no invention):**
 
 - **Fairino FR5** — a **6-DOF** (six degrees of freedom = six joints) arm.
-- **state_dim = 6** — the six joint angles, in **degrees**.
+- **state_dim = 7** — six joint angles (degrees) + current gripper opening [0,1].
 - **action_dim = 7** — six joint targets + **1 gripper** command.
 - **Camera** — Intel RealSense **D405** wrist camera, native **640×480**, resized
   to **224×224** for CLIP.

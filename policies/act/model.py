@@ -36,7 +36,7 @@ ACTION_KEY = "action"
 
 @dataclass
 class ACTConfig:
-    state_dim:          int   = 6
+    state_dim:          int   = 7
     action_dim:         int   = 7
     latent_dim:         int   = 32
     d_model:            int   = 512

@@ -959,22 +959,53 @@ This is causal confusion theory in action: more state channels = more signal to 
 less reason to learn the harder vision pathway. Note: **adding a second camera also didn't
 help** — a model that chooses to ignore one camera ignores two.
 
-### 11.5 The fixes that actually work
+### 11.5 Where this comes from — the research background
+
+This failure mode has a formal name in the literature: **causal confusion in imitation
+learning**, first systematically described by de Haan, Jayaraman & Levine (NeurIPS 2019):
+
+> "Causal Confusion in Imitation Learning" — de Haan et al., NeurIPS 2019
+> https://arxiv.org/abs/1905.11979
+
+The core insight: behavioral cloning learns a *discriminative* model (which input predicts the
+action?), not a *causal* model (which input actually *causes* the action?). These differ when
+spurious correlations exist in the data. The paper showed this causes systematic failures in
+driving and control benchmarks — and it maps directly onto the proprioceptive shortcut here.
+
+**What the broader field has found (2023–2025):**
+
+- **Shortcut Learning in Generalist Robot Policies (2024)** — analyzed the Open X-Embodiment
+  dataset and found shortcuts emerge from limited diversity *within* sub-datasets and
+  disparities *between* them. Fix: deliberately create "bridge" data that varies one factor
+  while holding others constant (object position varied, start pose fixed).
+
+- **Do You Need Proprioceptive States in Visuomotor Policies? (Zhao et al., 2025)**
+  https://arxiv.org/abs/2509.18644 — the most direct challenge to common practice. Key finding:
+  including proprioceptive state input often *hurts* generalization. Proposed a **state-free
+  policy** predicting actions from vision only (dual wide-angle wrist cameras, relative EEF
+  action space). Results: height generalization 0% → 85%, horizontal generalization 6% → 64%.
+  Implication: for many manipulation tasks, proprioceptive state may be an anti-pattern.
+
+- **CDP: Causal Diffusion Policy (2025)** — explicitly combines causal structure learning with
+  diffusion policies to identify which observations actually influence actions.
+  https://proceedings.mlr.press/v305/ma25c.html
+
+### 11.6 The fixes that actually work
 
 The fixes that **don't** work: bigger model, more layers, second camera, adding eef/gripper
 to state, training longer. All of these either don't break the shortcut or actively strengthen
 it.
 
-**The fixes that do work:**
+**The fixes that do work, in order of impact:**
 
-**1. Break the start-pose/grasp correlation in the data.** Record with a **fixed arm-home
-start** and a **widely varied object position**. Now the start state carries zero information
-about the grasp — the only way to lower the loss is to use the cameras. This is the most
-important fix.
+**1. Break the start-pose/grasp correlation in the data (most important).** Record with a
+**fixed arm-home start** and a **widely varied object position** across episodes. Now the
+start state carries zero information about the grasp — the only way to lower the loss is to
+use the cameras. This is the community consensus #1 fix across all robotics ML practice.
 
-**2. More demonstrations (~100–150 minimum).** Enough diversity that the vision pathway
-becomes worth learning. With ~54 episodes there isn't enough pressure for the harder vision
-pathway to beat the cheap state pathway.
+**2. More demonstrations (~100–150 minimum).** With fewer episodes the cheap state pathway
+always beats the expensive vision pathway. More diversity raises the floor that state alone
+can achieve, forcing vision to contribute.
 
 **3. Proprioception dropout (training-side).** Randomly zero the entire state vector with
 probability `p` during training:
@@ -985,10 +1016,20 @@ if train and random() < proprio_dropout:
     state = torch.zeros_like(state)
 ```
 
-This directly attacks the shortcut: the loss can no longer be driven purely by state, so the
-vision pathway is forced to contribute. At deploy, dropout is off and you use the full state.
-Each of these fixes is verifiable with the same conflict-swap probe — a successful fix should
-push the image correlation up and the state correlation down toward 1×.
+Rate used in practice: 20–40%. This directly attacks the shortcut — the loss can no longer
+be driven purely by state for all samples, so the vision pathway is forced to learn. At
+deploy, dropout is off and you use the full state normally.
+
+**4. State-free policy (most aggressive fix).** Drop the proprioceptive state input entirely.
+Use vision only. Zhao et al. 2025 showed this actually *improves* generalization for many
+tasks because it removes the shortcut path completely. Requires a good visual representation
+(wide-angle wrist camera, relative action space). This is where the field seems to be heading
+in 2025.
+
+**Validation — how to tell if the fix worked.** The same conflict-swap probe:
+- blank cameras, keep state → action should barely change (cameras are doing the work now)
+- state ablation → action should change by similar amount (neither dominates)
+- conflict swap correlation → image corr should be high, state corr near zero
 
 **In one sentence:** the shortcut is a property of what minimizes the loss on *this* data, so
 the fix must change the data or the loss — not the model size or the number of cameras.

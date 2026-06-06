@@ -546,23 +546,156 @@ At **inference** (`predict`), `n_obs_steps = 1` and the lerobot **action queue**
 
 ---
 
-## 14. The action queue: receding horizon control
+## 14. Inference: the 30 Hz loop, action queue, and why there is no temporal ensembling
 
-The U-Net predicts a chunk of **`horizon = 16`** future actions (16 steps × (1/30 s) ≈ **0.53 seconds** of motion). But we only **execute the first `n_action_steps = 8`** of them, then throw the rest away and re-predict from the fresh observation. This pattern — predict a horizon, execute a prefix, re-plan — is called **receding horizon control** (borrowed from model-predictive control). The mechanism that holds the 8 ready-to-go actions and doles them out one per control tick is the **action queue**.
+### 14.0 The 30 Hz control loop — tick by tick
+
+**Hz = times per second.** 30 Hz means one tick every **33 ms**:
 
 ```
-predict 16:  [a0 a1 a2 a3 a4 a5 a6 a7 | a8 a9 a10 a11 a12 a13 a14 a15]
-execute:      ▲  ▲  ▲  ▲  ▲  ▲  ▲  ▲    └──────── discarded ────────┘
-              └─ these 8 only, then RE-PREDICT from a new observation
+1000 ms / 30 = 33.3 ms per tick
 ```
 
-**Why predict 16 but execute only 8?** Two competing pressures:
-- Predicting a longer horizon gives the U-Net **context** to make a coherent, smooth trajectory (the 1-D convolutions need neighbors; the *ends* of the chunk are lower-quality because they have fewer neighbors and are further from the observation).
-- Executing fewer steps keeps the robot **reactive** — it re-looks at the world every 8 ticks (~0.27 s) and corrects for anything that changed.
+Every tick does the same four things:
 
-So we **discard the back half** because those late predictions are the least reliable (furthest in the future, least constrained by the current observation, near the chunk's edge), and re-querying replaces them with fresh, observation-grounded ones. Executing the full 16 open-loop would let errors and stale assumptions accumulate; executing only 1 would waste the 10-step denoising cost on every single tick. 8-of-16 is the balance the original Diffusion Policy paper landed on, and it's what this repo uses.
+```
+tick at t=0  (0 ms):
+    1. read joint encoders     →  state  (7,)
+    2. grab wrist camera frame →  image  (3, 224, 224)
+    3. model.predict()         →  action (7,)
+    4. send action to FR5      →  robot moves
 
-In the repo: call `model.reset()` once at the start of an episode (clears the queue), then call `model.predict(...)` every control tick. When the queue is empty, `predict` runs the 10-step DDIM denoise to refill it; otherwise it just pops the next action.
+tick at t=1  (33 ms):  repeat
+tick at t=2  (66 ms):  repeat
+...
+```
+
+The FR5's internal servo loop runs at 1000 Hz — it holds and interpolates to the last joint
+target you sent, so the arm moves smoothly between your 33 ms updates.
+
+### 14.1 The action queue — how predict() actually works
+
+Diffusion Policy predicts a chunk of `horizon = 16` future actions in one go, but only
+**executes the first `n_action_steps = 8`** of them. The model keeps an internal queue:
+
+```python
+on reset():
+    queue = []   # empty
+
+each predict() call:
+    if queue is empty:
+        run DDIM denoising  →  chunk (16, 7)
+        push chunk[:8] into queue    # only the first 8
+        # chunk[8:15] is thrown away
+    action = queue.popleft()         # pop next precomputed action
+    return action
+```
+
+The full timeline on the robot:
+
+```
+t=0:  queue empty → run DDIM → chunk [a0..a15]
+      push [a0..a7] into queue
+      pop a0 → send to robot    ← DDIM ran this tick (expensive)
+
+t=1:  pop a1 → send             ← no model call, just popping (cheap)
+t=2:  pop a2 → send
+t=3:  pop a3 → send
+t=4:  pop a4 → send
+t=5:  pop a5 → send
+t=6:  pop a6 → send
+t=7:  pop a7 → send
+
+t=8:  queue empty → run DDIM again with fresh state + image
+      push new [a0..a7] into queue
+      pop a0 → send              ← DDIM runs again here
+
+t=9:  pop a1 → send
+...
+```
+
+The model only calls the U-Net on ticks where the queue empties — **once every 8 steps
+(~267 ms)**. The other 7 ticks just pop from the queue and cost almost nothing.
+
+### 14.2 Why predict 16 but execute only 8?
+
+Two competing pressures:
+
+- **Longer horizon → more coherent chunk.** The 1-D U-Net uses convolutions that need
+  neighbouring timesteps as context. A chunk of 16 gives the early steps enough context to
+  produce smooth, physically consistent trajectories. Predicting only 8 steps would give the
+  U-Net less context and hurt quality.
+
+- **Shorter execution → more reactive.** Executing only 8 steps means you re-observe the world
+  every 267 ms and correct for anything that changed (object moved, arm drifted, etc.).
+  Executing all 16 open-loop for 533 ms lets stale assumptions accumulate.
+
+The **back half (steps 8–15) is discarded** because those far-future predictions are the least
+reliable — furthest from the current observation, near the chunk's edge where convolutions have
+fewer neighbours. Re-querying replaces them with fresh, observation-grounded ones.
+
+```
+chunk:  [a0  a1  a2  a3  a4  a5  a6  a7 | a8  a9  a10 a11 a12 a13 a14 a15]
+         ←────────── execute these ──────→   ←──────── discard these ───────→
+              (fresh enough, 8 steps)              (too uncertain, too far)
+```
+
+8-of-16 is the balance the original Diffusion Policy paper settled on, and it's what this
+repo uses.
+
+### 14.3 What DDIM does during the expensive refill tick
+
+When the queue is empty, `predict()` runs the full DDIM reverse process:
+
+```
+x_K ~ N(0, I)      shape (16, 7)    ← start from pure Gaussian noise
+
+DDIM step 1:   ε̂ = U-Net(x_K,  k=K,  conditioning c)
+               x_{K-1} = DDIM_update(x_K, ε̂)      ← less noisy
+
+DDIM step 2:   ε̂ = U-Net(x_{K-1}, k=K-1, conditioning c)
+               x_{K-2} = DDIM_update(x_{K-1}, ε̂)
+
+... 10 steps total ...
+
+x_0  =  clean action chunk (16, 7)
+```
+
+The conditioning vector `c` (image features + state) is computed **once** before the loop and
+injected into every U-Net call via FiLM. That's 10 U-Net forward passes in a single `predict()`
+call — the expensive part.
+
+**Cost:** ~250 ms on CPU (blows the 33 ms budget for that tick), ~5–10 ms on GPU (fits).
+Amortised over 8 steps: 250 ms / 8 = ~31 ms per step on CPU — just barely survivable, but
+the one refill tick will stall. **This is why Diffusion Policy needs a GPU for real-time use.**
+
+### 14.4 There is no temporal ensembling here
+
+ACT needs temporal ensembling because it executes 100 steps open-loop — the 3.3 second
+blind window causes a jerk at every chunk boundary. Diffusion Policy avoids this differently:
+
+- **Short execution window** (8 steps = 267 ms, not 3.3 s) → re-queries often enough that
+  observations stay fresh. No long blind period, so no meaningful boundary jerk.
+- **The denoising process itself produces smooth chunks** — 10 DDIM steps iteratively
+  refine the prediction into a physically consistent trajectory. The chunk is already smooth
+  without needing to blend it with past predictions.
+- Overlapping chunks are not needed.
+
+The smoothness in Diffusion Policy comes from **what the model predicts** (a smooth denoised
+trajectory) rather than from **how you blend predictions** (temporal ensembling).
+
+### 14.5 Full comparison with ACT
+
+| | ACT (TE on) | ACT (no TE) | Diffusion Policy |
+|---|---|---|---|
+| Chunk size | 100 | 100 | 16 |
+| Steps executed per query | 1 | 100 | 8 |
+| Model runs every | 1 step (33 ms) | 100 steps (3.3 s) | 8 steps (267 ms) |
+| Observation freshness | every tick | every 3.3 s | every 267 ms |
+| Smoothing mechanism | temporal ensembling | none (jerky boundary) | short receding horizon |
+| Model cost per query | 1 forward pass | 1 forward pass | 10 U-Net calls |
+| GPU needed? | no (CPU ok) | no | yes for real-time |
+| Temporal ensembling? | yes | no | **no** |
 
 ---
 

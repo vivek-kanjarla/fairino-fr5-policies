@@ -1056,6 +1056,202 @@ In short: **ACT is the lightweight workhorse.** Start here; escalate only if its
 
 ---
 
+## 13. Why Behavioral Cloning Fails — Intuitions Behind the Failure Modes
+
+This section explains, in plain language, the structural reasons why BC and ACT break
+down in practice. The formal treatment and FR5-specific evidence are in
+[`il_failure_modes.md`](il_failure_modes.md). This section gives you the intuition first.
+
+### 13.0 The core problem with BC
+
+BC trains a policy by supervised learning on (observation, action) pairs from human
+demonstrations. The objective is:
+
+```
+L = E[ ||π(obs) - action||² ]
+```
+
+That's it. Minimize prediction error on the training data. BC has no mechanism to
+understand *why* the expert took an action — it only learns *that* this action followed
+this observation. And it has no feedback loop — once deployed, if something goes wrong,
+it has no way to detect or correct it.
+
+Every failure mode below is a consequence of one of those two gaps.
+
+### 13.1 Causal confusion — the check engine light problem
+
+Imagine training a self-driving car using BC. In the training data, every time the
+"check engine" light is on, the expert brakes. The car learns: *check engine light →
+brake*. At deployment, the check engine light comes on while cruising on a highway and
+the car brakes suddenly.
+
+The light didn't *cause* the braking. The traffic ahead caused it. The light just
+happened to correlate with braking in the training data. BC can't tell the difference
+between a cause and a coincidence.
+
+This is the formal problem: BC learns **P(action | observation)** — the probability of
+an action *given* what was observed. What you actually want is **P(action | do(obs))**
+— what happens if you *intervene* and force a specific observation. These two quantities
+are only equal when there are no spurious correlations in the data. In robotics, there
+almost always are.
+
+**On the FR5:** the joint angles at the start of each episode were correlated with where
+the grasp would happen (corr=0.45), because the operator tended to start near the
+object. So the policy learned: *joint state → grasp location*. It didn't need the
+cameras. State was the "check engine light" — a cheap predictor that happened to
+correlate with the action in training but was useless at deploy time (because the home
+pose is always the same).
+
+The conflict-swap probe made this undeniable: give the model state from episode A and
+image from episode B. It follows the state (corr=+0.85) and ignores the image
+(corr=−0.14). The camera is literally irrelevant to the model's decisions.
+
+What makes this insidious: **the training loss looked fine.** Low validation loss, no
+warning signs. The only way to catch it is a causal probe — which is why we ran one.
+
+### 13.2 Covariate shift — the bike riding problem
+
+Think about learning to ride a bike from a book. The book describes exactly what to do
+when perfectly balanced going straight. The moment you wobble, you're in a state the
+book never covered. Your actions from there are guesses. Each guess makes you wobble
+more.
+
+BC has exactly this problem. The policy is trained on states visited by the *expert*. The
+expert never makes a mistake, so the policy never sees "slightly off-trajectory" states.
+At deployment, the slightest deviation puts the robot in an unfamiliar state. The policy
+makes a slightly wrong action from there, landing in an even more unfamiliar state. Errors
+compound.
+
+**The math is brutal.** Ross & Bagnell (2011) proved that under BC, the expected cost
+after T steps grows as **O(T²)** — quadratic in the horizon. A 10-second task at 30 Hz
+is 300 steps. Each step's error gets multiplied by T². This is why manipulation tasks
+that look fine in the first second then completely fall apart.
+
+DAgger fixes this by collecting demonstrations at the states the policy actually visits
+— including the off-trajectory ones. The policy gets "recovery examples" and the cost
+bound improves to O(T) — linear, like a human who can recover from wobbles because
+they've wobbled before.
+
+**On the FR5:** the "went absolute nuts" episodes. The first 300ms (one ACT chunk) looked
+plausible — near training distribution. After that, as the arm drifted to positions
+never seen in 54 training episodes, predictions became incoherent. The VRworking version
+ran 3.3 seconds (100 actions) completely open-loop — by second 3, the robot could be in
+a state thousands of joint-degrees away from any training example, and the policy had
+nothing to say about it.
+
+Temporal ensembling partially mitigates this: the policy re-plans every 33ms from the
+current observed state. Each tick anchors the trajectory back toward something reasonable,
+limiting how far errors can compound before correction.
+
+### 13.3 Mode averaging — the average of two correct answers is wrong
+
+Say the human sometimes approaches the object from the left and sometimes from the right.
+Both are valid strategies. For the same visual scene (object in center), the training data
+contains two clusters of actions: left-approach trajectories and right-approach trajectories.
+
+BC minimizes squared error. The squared error is minimized by predicting the **mean** of
+all actions for a given observation. The mean of "go left" and "go right" is "go straight
+ahead" — which is wrong. The model doesn't pick one strategy; it hedges and picks neither.
+
+This is why vanilla BC with L2 loss cannot handle multimodal demonstrations. The loss
+function punishes deviations from the average, so the policy is the average of all
+demonstrated strategies, which is often physically impossible.
+
+**ACT's CVAE is the explicit answer to this.** The latent z encodes which mode the
+current demonstration belongs to. "This is a left-approach demo" → z encodes that.
+At inference, z=0 commits to the most common mode rather than averaging all of them.
+Diffusion handles it differently: the stochastic sampling naturally lands in one mode
+or the other rather than converging to the mean.
+
+**On the FR5:** less severe because pick-place is mostly unimodal — one object, one
+target, one reasonable approach. But inconsistent operator style across demos (different
+preferred approach angles, grasp heights) contributes to the "sometimes works, sometimes
+absolute nuts" pattern.
+
+### 13.4 Data insufficiency — why 54 demos is not enough
+
+Think about what vision-based grasping requires the ResNet to learn. It needs to see an
+object in many positions, at many angles, under many lighting conditions, and associate
+each configuration with the correct reach direction. This requires *dense coverage* of
+the visual space.
+
+The visual input space for a 224×224×3 image is ~150,000 dimensions. 54 demonstrations
+means 54 distinct visual scenes. That's like trying to learn object detection by seeing
+54 examples total — barely enough to memorize, nowhere near enough to generalize.
+
+**Diversity matters more than quantity.** 200 demos all with the object in the same 5cm
+region is worse than 80 demos spread uniformly across the workspace. Coverage of the
+state space forces the model to generalize.
+
+The FR5's data bottleneck was confirmed by the most diagnostic observation: the 94M-
+parameter paper-scale ACT had *the same validation loss* as the small model. When more
+capacity doesn't help, the bottleneck is data, not model size. The model already had
+enough parameters to memorize 54 episodes — adding more parameters just memorized them
+faster, not better.
+
+Community threshold: below ~100 diverse demonstrations, the proprioceptive shortcut
+almost always wins. At 100–150 demos with proper workspace coverage, the shortcut's
+advantage shrinks. At 150–300 demos, vision-primary behavior starts to emerge reliably.
+
+### 13.5 Open-loop blindness — the robot can't feel itself failing
+
+The robot does something. It doesn't check if it worked. It does the next thing.
+
+The critical moment is the grasp. The arm reaches → gripper closes → arm lifts. If the
+gripper closed on air (approach was 2mm off, object slipped), the lift proceeds anyway.
+The policy has no signal that the grasp failed — it continues the "lift" motion and
+raises nothing.
+
+Without `gripper_norm` in the observation, the policy doesn't even know whether its own
+gripper is open or closed at the moment of replanning. It is blind to its own state.
+
+**On the FR5 (VRworking version):** state_dim=6, no gripper state, 100 actions over
+3.3 seconds, completely open-loop. Reach goes to wrong location (shortcut), gripper
+closes on air, lift proceeds, robot holds nothing. Three failure modes converged on the
+same grasping step.
+
+The fix implemented in this session: state_dim=7 now includes `gripper_norm`. At every
+ACT replanning tick (33ms), the policy observes its own current gripper state. What is
+still missing: a grasp-success gate — "if gripper is still open 200ms after the close
+command, abort and retry."
+
+### 13.6 How they all interacted on the FR5
+
+The failures were not independent. They amplified each other in a chain:
+
+```
+54 demos, operator starts near object
+    │
+    ├─► Shortcut forms: state predicts grasp, vision ignored
+    │
+    ├─► Data coverage is sparse: workspace mostly uncovered
+    │
+    │   At deployment:
+    │
+    ├─► Shortcut fires: arm goes to wrong location (same every time)
+    │
+    ├─► Gripper closes on air: no feedback, no detection
+    │
+    └─► 3.3s open-loop: errors compound with T², robot in never-seen state
+        → policy produces garbage → "absolute nuts"
+```
+
+The occasional success: when the object happened to be placed near the "average" location
+the shortcut had memorized. Move it 10cm and the policy had nothing.
+
+### 13.7 The fix order matters
+
+**Fix the data first.** Everything else is built on top of the training distribution. No
+architecture change, no dropout, no bigger model will make a policy reliable if the
+training data has a built-in correlation that creates a shortcut. Fix the correlation
+(fixed home start, varied object position), then increase coverage (100–150+ demos),
+then add dropout, then fix the action space.
+
+Fixing only one layer while leaving the others active is unlikely to produce reliable
+pick-place behavior. The failures compound, and so must the fixes.
+
+---
+
 ## 12. Glossary
 
 > **ACT data flow (Mermaid — renders on GitHub)**

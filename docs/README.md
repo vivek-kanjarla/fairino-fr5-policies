@@ -11,6 +11,7 @@ plain-English deep dives on each policy in this repo — what it is, how it work
 
 | # | doc | model | one-liner |
 |---|---|---|---|
+| — | [il_failure_modes.md](il_failure_modes.md) | **all** | why BC fails (causal confusion, covariate shift, data gap, open-loop blindness) — mapped to FR5 |
 | 1 | [act.md](act.md) | **ACT** | transformer directly predicts a 100-step action chunk; CVAE captures demo variability |
 | 2 | [diffusion_policy.md](diffusion_policy.md) | **Diffusion Policy** | denoise a corrupted action chunk back to clean (DDPM + 1-D U-Net) |
 | 3 | [dit_flow.md](dit_flow.md) | **DiT + Flow Matching** | same denoising idea, but transformer denoiser + straight-line flow matching + language |

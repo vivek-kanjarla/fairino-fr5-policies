@@ -137,6 +137,86 @@ Priority order:
    this improved height generalization 0% → 85%, horizontal 6% → 64%. The vision-only
    policy has no shortcut available and is forced to solve the visual problem.
 
+### 1.7 Modality laziness — why state wins the training race
+
+The proprioceptive shortcut has a deeper mechanism than just "state correlates with
+action." There is a specific dynamic in multimodal learning called **modality laziness**:
+due to the greedy nature of deep models in joint optimization, the model prioritizes
+modalities that converge faster (strong modalities), which suppresses learning of
+slower modalities (weak modalities).
+
+For the FR5 policy:
+
+| Modality | Why it's "easy" to learn from | Why it wins gradient competition |
+|---|---|---|
+| 6 joint angles + gripper | Low-dimensional, noiseless, directly in the same units as the action | Loss drops fast, large gradients early in training |
+| Wrist camera (D405) | High-dimensional pixels, changes with every arm movement | Loss drops slowly, gradients are weak |
+| Scene camera (D435i) | Fixed viewpoint but lighting variation, background clutter | Weakest signal, most redundant with wrist |
+
+What actually happens during training:
+
+```
+Epoch 1–5:   State branch converges quickly → loss drops sharply
+Epoch 5–50:  State branch already doing well → image gradients are tiny
+             (adding more from image barely changes the loss)
+Epoch 50+:   State branch frozen in good solution → image encoder
+             gets near-zero gradient → never learns to detect the object
+```
+
+The final policy is effectively: `action ≈ f(state) + ε · g(image_features)`
+where ε is very small. When you zero out the images, `g(zeros)` maps to some
+near-zero embedding (a consistent offset the policy has absorbed), and the policy
+keeps working because the state branch carries almost all the weight.
+
+This explains why the blank-image test works on the FR5: by the time training ended,
+the image encoder had learned to represent nearly nothing useful. The training
+objective was already satisfied without it.
+
+**The fix for modality laziness** is to make the state branch unavailable for some
+fraction of training (dropout), or to remove it entirely, forcing the optimizer to
+route gradient through the image encoder.
+
+### 1.8 The in-distribution vs OOD distinction — why original ACT "worked"
+
+A critical nuance: ACT and similar policies are **not** pure trajectory replay. The
+original ACT paper explicitly demonstrates disturbance recovery — physical perturbations
+mid-task where the robot recovers using visual feedback. ACT does use vision
+meaningfully within its training distribution.
+
+The key phrase is *within its training distribution.* ACT was evaluated with object
+positions randomized along a 15cm reference line — **the same 15cm range for both
+training and testing**. That is in-distribution spatial variation. The robot was never
+tested on table heights, object positions, or approach angles outside that range.
+
+What happens outside training distribution? A 2025 benchmarking study specifically
+tested ACT on spatial out-of-distribution settings:
+
+| Task | ACT | π0 | Gap |
+|---|---|---|---|
+| Clean Dish (OOD) | 36% | 85% | −49% |
+| Put Sponge in Pot (OOD) | 32% | 80% | −48% |
+| Unzip Bag (OOD) | 3% | 56% | −53% |
+| Folding Shorts (OOD) | 0% | 0–46% | — |
+
+ACT degrades significantly OOD — it doesn't completely fail, but it clearly has much
+weaker spatial generalization than a model trained on diverse data (π0).
+
+**The fine-tuning regime problem.** π0's advantage comes from pre-training on 10,000+
+hours of demonstration data across 68 tasks and 7 robot configurations. At that scale,
+the same joint state maps to dozens of different correct actions depending on the task
+and object position — the state shortcut can no longer memorize a single trajectory,
+so the visual backbone is forced to develop. But — and this is what the Zhao et al.
+2025 paper targets — when you fine-tune π0 on your narrow real-world data (a few
+hundred episodes, same table height, same approximate object zone), the shortcut comes
+back. Fine-tuning on low-diversity data overwrites the learned visual features with a
+state-to-action mapping in the fine-tuning distribution.
+
+**Your FR5 situation:** you are not running ACT or π0 with 10,000 hours of pre-training.
+You are fine-tuning on ~54 pick-place demos, all at the same table height, in the same
+approximate object region. This is the exact regime where state dominance is most severe.
+The blank-image test confirming the shortcut is not a property of ACT or diffusion
+policy as architectures — it is a property of your dataset.
+
 ---
 
 ## 2. Covariate Shift and Compounding Errors
@@ -444,11 +524,42 @@ obs: q_home (fixed) → predict: q_grasp (memorized) → action: go to q_grasp
 No vision required at any step. Switching to delta actions would partially break this
 because the policy can no longer directly output a memorized absolute target.
 
-### 6.3 Fix
+### 6.3 The action space generalization table
 
-- Switch to delta joint angles: `a_t = q_{t+1} - q_t` instead of `a_t = q_{t+1}`
-- Or switch to delta EEF pose in Cartesian space: `a_t = [Δx, Δy, Δz, Δrx, Δry, Δrz]`
-- EEF delta is more interpretable and generalizes better across object heights
+Zhao et al. 2025 Table III tested four action space choices, all with a state-free
+policy (vision only), on pick-place tasks. The result is unambiguous:
+
+| Action space | Height generalization | Horizontal generalization |
+|---|---|---|
+| **Relative EEF** (Δx, Δy, Δz) | **0.984** | **0.584** |
+| Absolute EEF | 0 | 0 |
+| Relative joint angle (Δq) | 0 | 0 |
+| Absolute joint angle (q) | 0 | 0 |
+
+Only relative end-effector actions generalize. The reason:
+
+```
+Absolute joint angles:   action = q_t+1                            depends on absolute pose
+Relative joint angles:   action = Δq   = q_t+1 − q_t              depends on current joints via FK
+Absolute EEF:            action = EEF_t+1                          still tied to absolute Cartesian
+Relative EEF:            action = ΔEEF = EEF_t+1 − EEF_t          same visual scene → same action
+```
+
+Relative EEF is the only space where the same visual observation reliably produces the
+same action regardless of where the robot's absolute pose is. A "move 3cm forward"
+command means the same thing whether the table is 80cm high or 90cm high.
+
+The FR5 currently uses **absolute joint angles** — the worst possible choice for
+generalization. This directly amplifies the proprioceptive shortcut: the policy can
+trivially memorize `home_pose → grasp_pose` as a fixed lookup table.
+
+### 6.4 Fix
+
+- Switch to relative EEF: `a_t = [Δx, Δy, Δz, Δrx, Δry, Δrz, Δgripper]` in Cartesian space
+- This requires a forward kinematics layer to convert policy output to joint commands at
+  execution time (most robot controllers support Cartesian EEF mode natively)
+- Or as a cheaper intermediate: delta joint angles `a_t = q_{t+1} - q_t`, which at
+  least removes the absolute memorization problem, though FK coupling remains
 
 ---
 
@@ -497,7 +608,32 @@ the gradients from that 0.8% are swamped by the rest of the image.
 Fix: crop the image to the region of interest (RoI) before feeding to ResNet, or use
 a higher-resolution camera for fine manipulation.
 
-### 7.4 FR5 evidence
+### 7.4 The overhead camera problem — more cameras can hurt
+
+Counterintuitive finding from Zhao et al. 2025 (Table VII): adding an overhead/scene
+camera actually *hurt* spatial generalization in multiple conditions:
+
+| Setup | In-domain (100cm) | Table raised (up 10cm) | Holder shifted (20cm) |
+|---|---|---|---|
+| **With overhead camera** | 0% | 46.7% | 0% |
+| **Wrist camera only** | **100%** | **86.7%** | **80%** |
+
+The overhead camera provides a global view of the workspace — which means when the
+table height or object position changes, the overhead view changes too. The policy
+trained with an overhead camera has learned to rely on specific visual features in
+that fixed overhead view. Move the table 10cm and the overhead scene looks different,
+creating distribution shift even in the visual branch.
+
+The wrist camera, by contrast, naturally follows the end-effector. Its view of the
+object stays roughly consistent regardless of table height (the camera moves with
+the arm), making it more robust to spatial variations.
+
+**For the FR5:** the D435i scene camera is a scene/overhead camera. Based on this
+finding, removing it (or at least ablating it) and relying only on the wrist D405
+may improve spatial generalization. Before adding more cameras, check whether each
+one is actually helping or introducing a new source of distribution shift.
+
+### 7.5 FR5 evidence
 
 The scene camera + wrist camera combination is well-designed in principle. The issues
 are:
@@ -505,6 +641,8 @@ are:
 - Wrist camera self-occlusion during grasp closing (unavoidable without redesign)
 - 54 demos insufficient to learn stable visual features across approach angles
 - No image crop or RoI — full 224×224 frames fed to ResNet
+- Scene camera may be creating distribution shift as a second source of spatial context
+  (remove it and test with wrist-only to validate)
 
 ---
 
@@ -693,16 +831,128 @@ Expected outcome: shortcut ratio drops from 5× toward 1–2×, image correlatio
 
 | Failure mode | In literature since | FR5 hit it? | Severity | Status |
 |---|---|---|---|---|
-| Causal confusion / proprioceptive shortcut | de Haan 2019 | **Yes — probes confirm** | Critical | Partially fixed (state_dim=7, dropout added to config); data fix needed |
-| Covariate shift / compounding errors | Ross 2010 (DAgger) | **Yes — "went absolute nuts"** | High | Partially mitigated by temporal ensembling; DAgger not done |
+| Causal confusion / proprioceptive shortcut | de Haan 2019 | **Yes — probes confirm** | Critical | Partially fixed (state_dim=7, dropout in config); data fix needed |
+| Modality laziness | CVPR 2024 | **Yes — state won gradient race** | Critical | Same fix as above |
+| Covariate shift / compounding errors | Ross 2010 (DAgger) | **Yes — "went absolute nuts"** | High | Partially mitigated by TE; DAgger not done |
 | Mode averaging / collapse | — | Partial | Low | Handled by ACT CVAE |
 | Data insufficiency + coverage gaps | Community consensus | **Yes — 54 demos** | Critical | Not fixed — needs new data collection |
 | Open-loop execution blindness | — | **Yes — 3.3s, no gripper fb** | High | gripper_norm added to obs; grasp gate not implemented |
-| Absolute action space coupling | Zhao 2025 | Active | Medium | Not addressed yet |
+| Absolute action space coupling | Zhao 2025 | Active | Medium | Not addressed; relative EEF recommended |
+| Overhead camera distribution shift | Zhao 2025 | Possible | Medium | Not tested — ablate D435i and check |
 | Operator-specific bias | — | Likely | Medium | Not addressed yet |
 
-All critical failures (shortcut + data coverage) must be fixed before the policy can
-generalize reliably. The other modes can be addressed incrementally.
+All critical failures (shortcut + modality laziness + data coverage) must be fixed
+before the policy can generalize reliably. The other modes can be addressed incrementally.
+
+---
+
+## 13. World Models — Do They Have the Same Problem?
+
+A natural question: do world model architectures (Dreamer, TD-MPC, Cosmos-Policy) suffer
+from the proprioceptive shortcut and the other failure modes above? The answer depends
+heavily on *which* type of world model.
+
+### 13.1 Three types of world models in robotics
+
+| Type | Examples | How it works |
+|---|---|---|
+| **RSSM-based** | DreamerV3, DayDreamer | Learn latent dynamics from visual + proprio; policy trained via RL in imagination |
+| **Video-generation WAMs** | Cosmos-Policy, GE-Act, LingBot-VA | Built on video diffusion models pre-trained on internet video; actions decoded from video latents |
+| **TD-MPC style** | TD-MPC2 | Task-oriented latent dynamics model; MPC planning with learned value function |
+
+### 13.2 RSSM (Dreamer) — structurally more resistant, not immune
+
+The RSSM training objective is fundamentally different from BC:
+
+```
+BC loss:    ||π(state, image) − action||²         ← state directly predicts action
+RSSM loss:  ||future_image_predicted − future_image_actual||² + KL(posterior||prior)
+```
+
+To reconstruct a future image of "gripper approaching object from above," joint angles
+alone are insufficient — you need to encode what the scene actually looks like. The
+visual reconstruction objective **forces** the latent state to contain visual features.
+The latent state compresses both visual and proprioceptive information, but since the
+reconstruction target is visual, the latent cannot ignore the image pathway the way BC
+can.
+
+The policy that acts on this latent state gets a visually-feature-rich representation,
+not raw joint angles. This is the structural reason RSSM models are less susceptible to
+the state shortcut.
+
+**But RSSM has its own failure mode:** distributional brittleness in imagination.
+
+```
+State shortcut risk: LOW
+New failure mode: compounding prediction errors in imagined rollouts
+                  → small errors in contact, friction, object properties accumulate
+                  → imagined trajectory diverges from reality in OOD conditions
+                  → planning with a wrong world model is worse than no planning
+```
+
+If the table moves 10cm, the imagined future frames look different from anything in
+training. The world model's predictions diverge, the planned trajectory is wrong, and
+the policy fails — not because it ignored vision, but because its visual dynamics model
+was not trained on the new configuration.
+
+### 13.3 Video WAMs (Cosmos-Policy) — most resistant
+
+This is where the architecture is genuinely different. Video WAMs like Cosmos-Policy and
+LingBot-VA are built on video diffusion backbones pre-trained on internet-scale video
+**with no robot proprioception at all**. The visual dynamics representations were built
+entirely from pixels across millions of videos.
+
+When robot-specific fine-tuning is added:
+- The visual backbone already has deep spatiotemporal understanding
+- There is no history of the model relying on joint angles — the shortcut never formed
+- Proprioception is added as a conditioning signal on top of a 2B-parameter visual model
+  — it is very hard for a narrow fine-tuning dataset to override a backbone this strong
+
+Empirical results from the 2025 WAM robustness benchmarking study:
+
+| Architecture | Robustness under visual/language perturbations |
+|---|---|
+| LingBot-VA (WAM) | 74.2% on RoboTwin 2.0-Plus |
+| Cosmos-Policy (WAM) | 82.2% on LIBERO-Plus |
+| π0.5 (VLA) | Comparable on some tasks, weaker overall |
+| ACT (BC) | 3–36% on OOD tasks |
+
+The video WAM advantage comes from the pre-training making vision the dominant modality
+*by construction*, not by trying to prevent state from dominating.
+
+**The catch:** WAMs require massive compute (video diffusion backbone ≥2B params),
+internet-scale pre-training infrastructure, and expensive fine-tuning. Not practical for
+a lab-scale FR5 setup today.
+
+### 13.4 TD-MPC — somewhere in between
+
+TD-MPC learns task-oriented latent dynamics and plans via MPC with a learned value
+function. It is less susceptible to BC-style state shortcuts because the dynamics model
+must predict *transitions*, not just actions. But task-specific representations don't
+transfer well, and the same distributional brittleness as RSSM applies.
+
+### 13.5 The deeper principle
+
+The proprioceptive shortcut is a special case of a general principle:
+
+> **Whichever input modality provides the cheapest path to minimizing the training loss
+> will dominate, regardless of which modality is causally relevant.**
+
+| Architecture | Cheapest loss path | Dominant modality | Failure mode |
+|---|---|---|---|
+| BC (ACT, Diffusion) | State → action lookup | Proprioception | Trajectory memorization |
+| RSSM (Dreamer) | State + visual → future visual | Both (forced by reconstruction) | OOD imagination errors |
+| Video WAMs | Visual dynamics only (pre-training) | Vision | Fine-tuning distribution shift |
+
+The state-free policy paper's fix — remove the shortcut-prone input entirely — is the
+most surgical solution. World models achieve something similar but through a more
+expensive route: making the training objective hard enough that state alone is
+insufficient to satisfy it.
+
+For the FR5 at current scale: RSSM world models would require online RL data collection
+(expensive, dangerous on real hardware). Video WAMs are too compute-heavy. The practical
+path is BC with state-free + relative EEF action space — the Zhao et al. 2025 approach,
+which gives WAM-level spatial generalization at BC cost.
 
 ---
 
@@ -722,4 +972,14 @@ generalize reliably. The other modes can be addressed incrementally.
 - Zhao et al. — "Learning Fine-Grained Bimanual Manipulation with Low-Cost Hardware"
   (ACT paper) — RSS 2023 · https://arxiv.org/abs/2304.13705
 - "Shortcut Learning in Generalist Robot Policies" — 2024
-  (Open X-Embodiment shortcut analysis)
+  (Open X-Embodiment shortcut analysis) · https://arxiv.org/abs/2508.06426
+- Zhang et al. — "Multimodal Representation Learning by Alternating Unimodal Adaptation"
+  (modality laziness) — CVPR 2024 · https://arxiv.org/abs/2311.10707
+- "Experiences from Benchmarking Vision-Language-Action Models for Robotic Manipulation"
+  2025 · https://arxiv.org/abs/2511.11298
+- "Do World Action Models Generalize Better than VLAs? A Robustness Study" — 2025
+  https://arxiv.org/abs/2603.22078
+- Ha & Schmidhuber — "World Models" — NeurIPS 2018
+- Hafner et al. — "Mastering diverse control tasks through world models" (DreamerV3)
+  Nature 2025 · https://www.nature.com/articles/s41586-025-08744-2
+- Hansen et al. — "TD-MPC2: Scalable, Robust World Models for Continuous Control" — 2024

@@ -9,7 +9,11 @@
 # It does NOT use common/train.py or common/deploy.py (those are PyTorch).
 
 model:
-  pretrained: "hf://rail-berkeley/octo-base-1.5"   # Octo team weights (93M). small: octo-small-1.5 (27M)
+  # Octo team weights. octo-base-1.5 (93M) is the LARGEST official Octo checkpoint
+  # (there is no "octo-large" — only small/base were released). This is the Linux
+  # default. For a quick local/CPU test use the lighter octo-small-1.5 (27M) via
+  # the --model flag, e.g. --model hf://rail-berkeley/octo-small-1.5
+  pretrained: "hf://rail-berkeley/octo-base-1.5"
   window_size: 2          # frames of history Octo attends over (octo default = 2)
   action_horizon: 4       # future actions predicted per step (octo default = 4)
   action_dim: 7           # FR5: 6 joints (deg) + gripper_norm [0,1]

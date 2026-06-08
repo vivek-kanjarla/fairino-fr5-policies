@@ -153,8 +153,11 @@ a from-scratch state-based ACT — at the cost of a heavier (JAX) stack and a la
 
 ## 7. Practical notes
 
-- **Model size:** default `octo-base-1.5` (93M). `octo-small-1.5` (27M) is a faster, lighter
-  alternative — far smaller than the π0 VLMs, safe to run on a modest machine.
+- **Model size:** `octo-base-1.5` (93M) is the **largest** official Octo checkpoint — there
+  is no `octo-large` (the team released only `octo-small` and `octo-base`). It is the
+  **Linux / GPU default** (`config.yaml` and the scripts use it). `octo-small-1.5` (27M) is
+  the lighter option for local/CPU testing (`--model hf://rail-berkeley/octo-small-1.5`).
+  Both are far smaller than the π0 VLMs.
 - **Dependency pins are load-bearing:** numpy `<2`, scipy `1.11`, tensorflow `2.15`, jax
   `0.4.20` form one compatible set (see `setup_env.sh`). Don't upgrade them piecemeal.
 - **All three workflows were verified** against `octo-small-1.5` on CPU: zero-shot output

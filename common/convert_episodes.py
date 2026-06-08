@@ -60,6 +60,14 @@ GRIPPER_COL = "gripper_norm"                                    # action[6]
 EEF_COLS = ["fr5_eef_x_mm", "fr5_eef_y_mm", "fr5_eef_z_mm",
             "fr5_eef_rx_deg", "fr5_eef_ry_deg", "fr5_eef_rz_deg"]  # observation.eef_pose (6)
 
+# action feature names per action space (action_dim stays 7 either way)
+ACTION_NAMES = {
+    "joint":     CMD_COLS + [GRIPPER_COL],
+    "delta_eef": ["delta_eef_x_mm", "delta_eef_y_mm", "delta_eef_z_mm",
+                  "delta_eef_rx_deg", "delta_eef_ry_deg", "delta_eef_rz_deg",
+                  GRIPPER_COL],
+}
+
 VIDEO_KEY = "observation.images.wrist_cam"
 
 
@@ -72,8 +80,14 @@ def _nearest_indices(csv_ts: np.ndarray, cam_ts: np.ndarray) -> np.ndarray:
     return pos - choose_left.astype(int)
 
 
-def _load_episode(ep_dir: Path, max_frames: int | None):
+def _load_episode(ep_dir: Path, max_frames: int | None, action_space: str = "joint"):
     """Resample one raw episode onto its camera timestamps.
+
+    action_space:
+      "joint"     — action = absolute commanded joint angles + gripper (default).
+      "delta_eef" — action = Cartesian TCP pose delta (eef[t+1]-eef[t]) + gripper.
+                    Generalizes far better but needs IK / ServoCart at deploy
+                    (see docs/action_spaces.md). action_dim is 7 either way.
 
     Returns (frame_dict, task_str) or None if the episode can't be used.
     """
@@ -101,12 +115,20 @@ def _load_episode(ep_dir: Path, max_frames: int | None):
     n = len(rows)
 
     state = rows[STATE_COLS].to_numpy(np.float32)
-    action = np.concatenate(
-        [rows[CMD_COLS].to_numpy(np.float32),
-         rows[[GRIPPER_COL]].to_numpy(np.float32)],
-        axis=1,
-    )
     eef = rows[EEF_COLS].to_numpy(np.float32)
+    gripper = rows[[GRIPPER_COL]].to_numpy(np.float32)
+
+    if action_space == "delta_eef":
+        # action[t] = eef[t+1] - eef[t]  (TCP pose delta within the episode);
+        # the final frame has no t+1, so its delta is zero. Orientation deltas
+        # (cols 3:6) are wrapped to [-180, 180] so a +179°/-181° pair (the same
+        # physical rotation) doesn't average to nonsense under temporal ensembling.
+        delta = np.zeros_like(eef)
+        delta[:-1] = eef[1:] - eef[:-1]
+        delta[:, 3:6] = (delta[:, 3:6] + 180.0) % 360.0 - 180.0
+        action = np.concatenate([delta, gripper], axis=1)
+    else:  # "joint" (default)
+        action = np.concatenate([rows[CMD_COLS].to_numpy(np.float32), gripper], axis=1)
 
     frame = {
         "observation.state": list(state),
@@ -144,12 +166,15 @@ def _extract_frames(video: Path, n_frames: int, out_dir: Path):
 
 
 def convert(episodes_dir: Path, out_dir: Path, extract_frames: bool,
-            max_frames: int | None):
+            max_frames: int | None, action_space: str = "joint"):
+    if action_space not in ACTION_NAMES:
+        raise SystemExit(f"unknown action_space {action_space!r}; "
+                         f"use one of {list(ACTION_NAMES)}")
     ep_dirs = sorted(p for p in episodes_dir.glob("episode_*") if p.is_dir())
     if not ep_dirs:
         raise SystemExit(f"no episode_* folders under {episodes_dir}")
 
-    print(f"found {len(ep_dirs)} episode(s) under {episodes_dir}")
+    print(f"found {len(ep_dirs)} episode(s) under {episodes_dir}  (action_space={action_space})")
 
     data_dir = out_dir / "data" / "chunk-000"
     ep_meta_dir = out_dir / "meta" / "episodes" / "chunk-000"
@@ -164,7 +189,7 @@ def convert(episodes_dir: Path, out_dir: Path, extract_frames: bool,
     cursor = 0  # running absolute row index across episodes
 
     for ep_idx, ep_dir in enumerate(ep_dirs):
-        loaded = _load_episode(ep_dir, max_frames)
+        loaded = _load_episode(ep_dir, max_frames, action_space)
         if loaded is None:
             continue
         frame, task = loaded
@@ -229,10 +254,12 @@ def convert(episodes_dir: Path, out_dir: Path, extract_frames: bool,
                    out_dir / "meta" / "tasks.parquet")
 
     # ---- meta/info.json ----
+    action_names = ACTION_NAMES[action_space]
     info = {
         "codebase_version": CODEBASE_VERSION,
         "robot_type": "fairino_fr5",
         "fps": FPS,
+        "action_space": action_space,   # "joint" | "delta_eef" — deploy reads this to pick execution
         "total_episodes": total_episodes,
         "total_frames": total_frames,
         "total_tasks": len(tasks),
@@ -241,8 +268,8 @@ def convert(episodes_dir: Path, out_dir: Path, extract_frames: bool,
         "features": {
             "observation.state": {"dtype": "float32", "shape": [len(STATE_COLS)],
                                    "names": STATE_COLS},
-            "action": {"dtype": "float32", "shape": [len(CMD_COLS) + 1],
-                       "names": CMD_COLS + [GRIPPER_COL]},
+            "action": {"dtype": "float32", "shape": [len(action_names)],
+                       "names": action_names},
             "observation.eef_pose": {"dtype": "float32", "shape": [len(EEF_COLS)],
                                      "names": EEF_COLS},
             VIDEO_KEY: {"dtype": "video", "shape": [480, 640, 3]},
@@ -266,10 +293,14 @@ def main():
                     help="pre-extract aligned JPEG frames for fast training I/O")
     ap.add_argument("--max-frames", type=int, default=None,
                     help="cap frames per episode (for quick pipeline tests)")
+    ap.add_argument("--action-space", choices=["joint", "delta_eef"], default="joint",
+                    help="joint: absolute joint-angle commands (default, no IK at deploy). "
+                         "delta_eef: Cartesian TCP pose deltas (better generalization; "
+                         "needs IK/ServoCart at deploy — see docs/action_spaces.md)")
     args = ap.parse_args()
 
     convert(Path(args.episodes), Path(args.out),
-            args.extract_frames, args.max_frames)
+            args.extract_frames, args.max_frames, args.action_space)
 
 
 if __name__ == "__main__":

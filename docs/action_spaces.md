@@ -179,80 +179,89 @@ Per Zhao 2025: 0% generalization, same as absolute joints. Skip.
 
 ---
 
-## 5. What changes in the codebase
+## 5. How it's implemented (config-driven, backward-compatible)
 
-The model architecture, training loop, and TE inference are **completely unchanged**.
-Action dim stays 7. Chunk size stays 100. The only two files that touch action
-representation:
+This is **built and wired end-to-end**, not just a proposal. The action space is a
+single switch that flows through the whole pipeline; the model architecture, training
+loop, and temporal ensembling are **completely unchanged** (action_dim stays 7).
 
-### 5.1 `common/convert_episodes.py`
+The switch lives at **conversion time** and is then carried automatically through the
+dataset → checkpoint → deploy, so a checkpoint always knows how to execute itself.
 
-```python
-# Current — absolute joint commands
-action = np.concatenate(
-    [rows[CMD_COLS].to_numpy(np.float32),
-     rows[[GRIPPER_COL]].to_numpy(np.float32)],
-    axis=1,
-)
-
-# New — delta EEF (Option B)
-eef = rows[EEF_COLS].to_numpy(np.float32)
-delta_eef = np.diff(eef, axis=0, prepend=eef[:1])  # Δ[t] = eef[t] - eef[t-1]; Δ[0]=0
-
-# wrap orientation columns (cols 3,4,5) to [-180, 180]
-delta_eef[:, 3:6] = (delta_eef[:, 3:6] + 180) % 360 - 180
-
-gripper = rows[[GRIPPER_COL]].to_numpy(np.float32)
-action = np.concatenate([delta_eef, gripper], axis=1)   # (N, 7)
+```
+convert_episodes.py --action-space {joint|delta_eef}
+        │  writes the chosen action representation into the dataset
+        │  AND stamps  meta/info.json["action_space"]
+        ▼
+train.py  reads dataset info, copies action_space into the checkpoint
+        ▼
+deploy.py  reads checkpoint["action_space"] and dispatches execution
 ```
 
-Also update `info.json` feature names:
-```python
-"action": {"dtype": "float32", "shape": [7],
-           "names": ["delta_eef_x_mm", "delta_eef_y_mm", "delta_eef_z_mm",
-                     "delta_eef_rx_deg", "delta_eef_ry_deg", "delta_eef_rz_deg",
-                     "gripper_norm"]}
+### 5.1 `common/convert_episodes.py` — `--action-space`
+
+```bash
+# default — absolute joint angles (no IK at deploy)
+python common/convert_episodes.py --episodes episodes --out <ds> --extract-frames
+
+# delta EEF — Cartesian TCP pose deltas
+python common/convert_episodes.py --episodes episodes --out <ds> --extract-frames \
+    --action-space delta_eef
 ```
 
-### 5.2 `common/deploy.py`
+For `delta_eef` it builds `action[t] = eef[t+1] − eef[t]` (per episode; the last frame's
+delta is 0), wraps orientation deltas to `[−180, 180]`, appends `gripper_norm`, and stamps
+`info.json["action_space"] = "delta_eef"` with the matching feature names
+(`delta_eef_x_mm … delta_eef_rz_deg, gripper_norm`). `joint` (default) is the old behavior.
+
+### 5.2 `common/train.py` — carries the tag into the checkpoint
+
+`train.py` reads `train_ds.info["action_space"]` and saves it in the checkpoint
+(`ckpt["action_space"]`). Nothing else in training changes — the model trains on whatever
+7-D action the dataset contains. **Single source of truth: the dataset's `info.json`.**
+
+### 5.3 `common/deploy.py` — dispatches execution
 
 ```python
-# Current
-joints_cmd  = action[:6].tolist()
-gripper_cmd = float(action[6])
-robot.servo_j(joints_cmd)
-
-# New — delta EEF with ServoCart
-current_eef = robot.get_eef_pose()           # [x_mm, y_mm, z_mm, rx_deg, ry_deg, rz_deg]
-delta        = action[:6]
-target_eef   = current_eef + delta
-robot.servo_cart(target_eef)                 # if FR5 SDK supports ServoCart
-
-# Alternative — delta EEF with online IK
-target_eef   = current_eef + delta
-joints_cmd   = robot.ik(target_eef)          # Fairino SDK has IK methods
-robot.servo_j(joints_cmd)
+model, cfg, action_space = load_policy(ckpt)          # action_space from the checkpoint
+...
+if action_space == "delta_eef":
+    current_eef = np.asarray(robot.get_eef_pose())     # [x,y,z (mm), rx,ry,rz (deg)]
+    target_eef  = (current_eef + action[:6]).tolist()  # apply the predicted delta
+    try:
+        joints = robot.inverse_kin(target_eef)         # IK -> joints
+        robot.servo_j(joints)                          # proven joint-servo execution
+    except IOError as e:                               # unreachable/singular target
+        print(f"[IK] {e} — holding pose")             # hold instead of crashing the loop
+else:  # "joint" (default)
+    robot.servo_j(action[:6].tolist())
 ```
 
-The observation side is unchanged: `robot.get_joint_positions()` still feeds the 7D
-state (joint angles + gripper_norm). The policy only changes its *output* representation.
+The **observation side is unchanged**: the policy still receives the 7-D state
+(joint angles + gripper). Only the *output* representation and how it's executed change.
+
+Backward compatible: a checkpoint with no `action_space` tag (anything trained before
+this change) defaults to `"joint"`, so existing models deploy exactly as before.
 
 ---
 
-## 6. Deploy-side: ServoCart vs IK
+## 6. Deploy-side: IK vs ServoCart (now in the robot wrapper)
 
-The Fairino FR5 SDK provides both options:
+The `FR5Controller` (`so101-fr5-teleop/fr5.py`) gained two methods for the delta-EEF path:
 
-| Method | API | Notes |
+| Method | Wraps (Fairino SDK) | Use |
 |---|---|---|
-| `ServoCart` | `robot.ServoCart(desc_pos, pos_gain, att_gain)` | Cartesian servo — direct EEF velocity/position servo |
-| IK → `ServoJ` | `robot.GetInverseKin(desc_pos)` → `robot.ServoJ(joint_pos)` | Two-step: IK then joint servo |
+| `inverse_kin(desc_pos)` | `GetInverseKin(0, pose, -1)` → joints | IK then `servo_j` — the **default** delta-EEF path. `config=-1` seeds from the current joints so successive solves stay continuous (no elbow flips). Raises on unreachable/singular targets so deploy can hold pose. |
+| `servo_cart(desc_pos, mode)` | `ServoCart(mode, pose, …)` | Direct Cartesian servo. `mode=0` absolute, `mode=1` incremental (feed the delta straight in). Lower latency (no IK round-trip), but can't pre-detect unreachable targets. |
 
-`ServoCart` is cleaner (no IK round-trip, lower latency). `GetInverseKin → ServoJ` is
-safer if the EEF target is near a singularity (IK can warn you).
+`deploy.py` uses **`inverse_kin` + `servo_j`** by default: it reuses the already-proven
+joint-servo execution path and lets you catch unreachable targets before commanding motion.
+`servo_cart` is available if you prefer Cartesian servo (especially `mode=1` for deltas).
 
-For a simple pick-place task well away from singularities, `ServoCart` is the right
-choice. Check that the FR5 firmware version supports it — it was added in SDK v3.x.
+> **Validate on the robot.** These two wrappers were written against the Fairino SDK API but
+> could not be exercised here (the `fairino` package only runs on the robot machine). Confirm
+> `GetInverseKin` / `ServoCart` behave/return as expected on your firmware before a full run —
+> the IK path's `try/except` already degrades safely (holds the last pose) if a call fails.
 
 ---
 

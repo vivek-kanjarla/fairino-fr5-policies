@@ -186,6 +186,9 @@ def main():
                 "val_l1":         val_l1,
                 "config":         cfg,
                 "stats":          stats,
+                # how to execute this model's actions on the robot (joint | delta_eef);
+                # stamped by convert_episodes into the dataset, deploy reads it back.
+                "action_space":   train_ds.info.get("action_space", "joint"),
             }
             path = ckpt_dir / f"epoch_{epoch:04d}.pt"
             torch.save(ckpt, path)

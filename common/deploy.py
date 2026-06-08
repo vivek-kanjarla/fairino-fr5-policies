@@ -66,8 +66,10 @@ def load_policy(ckpt_path: str, device: torch.device):
     model.load_state_dict(ckpt["model_state"])
     model.eval()
 
-    print(f"loaded {policy} checkpoint  epoch={ckpt['epoch']}  val_l1={ckpt['val_l1']:.4f}")
-    return model, cfg_dict
+    action_space = ckpt.get("action_space", "joint")
+    print(f"loaded {policy} checkpoint  epoch={ckpt['epoch']}  "
+          f"val_l1={ckpt['val_l1']:.4f}  action_space={action_space}")
+    return model, cfg_dict, action_space
 
 
 # ── camera ────────────────────────────────────────────────────────────────────
@@ -145,7 +147,7 @@ def run(args):
                           "mps"  if torch.backends.mps.is_available() else "cpu")
     print(f"device: {device}")
 
-    model, cfg_dict = load_policy(args.checkpoint, device)
+    model, cfg_dict, action_space = load_policy(args.checkpoint, device)
     use_image = cfg_dict["dataset"]["use_image"] and not args.no_image
 
     # Language-conditioned policies (dit_flow, pi0, pi05, pi0_fast) need the task
@@ -216,13 +218,26 @@ def run(args):
                     action = action[0]
                 action = action.cpu().numpy()
 
-                joints_cmd  = action[:6].tolist()
                 gripper_cmd = float(action[6])
                 last_gripper_cmd = gripper_cmd   # feeds back into next step's state vector
 
                 # ── execute ───────────────────────────────────────────────────
                 gripper.update(gripper_cmd)   # no-op unless threshold crossed
-                robot.servo_j(joints_cmd)
+                if action_space == "delta_eef":
+                    # action[:6] = TCP pose delta [dx,dy,dz (mm), drx,dry,drz (deg)].
+                    # Apply to the CURRENT measured pose, then IK -> joints -> servo.
+                    current_eef = np.asarray(robot.get_eef_pose(), dtype=float)
+                    target_eef  = (current_eef + np.asarray(action[:6], dtype=float)).tolist()
+                    try:
+                        joints_cmd = robot.inverse_kin(target_eef)
+                        robot.servo_j(joints_cmd)
+                    except IOError as e:
+                        # unreachable / singular target — hold last pose instead of crashing
+                        print(f"[IK] {e} — holding pose")
+                        joints_cmd = robot.get_joint_positions()
+                else:  # "joint"
+                    joints_cmd = action[:6].tolist()
+                    robot.servo_j(joints_cmd)
 
                 step += 1
 

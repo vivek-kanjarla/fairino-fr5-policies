@@ -33,6 +33,14 @@ model:
   vision_backbone: "resnet18"
   pretrained_backbone_weights: null   # GroupNorm is incompatible with pretrained BatchNorm weights
 
+  # proprioception handling — benchmark axis (see docs/proprioception_modes.md)
+  #   full    | state used as-is (baseline)
+  #   dropout | state randomly zeroed per-sample during training (rate below)
+  #   none    | state-free: state zeroed everywhere (vision-only)
+  # override per-run: python common/train.py --policy diffusion --proprio none
+  proprio_mode: full
+  proprio_dropout_rate: 0.3
+
 training:
   batch_size: 64
   lr: 1.0e-4

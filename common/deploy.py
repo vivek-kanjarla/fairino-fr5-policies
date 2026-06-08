@@ -188,13 +188,20 @@ def run(args):
             step       = 0
             t_last_log = time.monotonic()
             last_img   = None   # holds last valid frame to avoid None on drops
+            last_gripper_cmd = 1.0   # 7th state dim = current gripper opening; assume open at start
 
             while step < args.steps:
                 t0 = time.monotonic()
 
                 # ── observation ──────────────────────────────────────────────
-                joints = robot.get_joint_positions()                # list[float] × 6
-                obs    = torch.tensor(joints, dtype=torch.float32).unsqueeze(0).to(device)
+                # state = 6 joint angles (deg) + current gripper opening [0,1] = 7 dims,
+                # matching observation.state in the dataset (convert_episodes STATE_COLS).
+                # We track the last commanded gripper opening as a proxy for the current
+                # one (the FR5 gripper API is command-only, no position feedback). For
+                # proprio_mode='none' the model zeros this internally, so it is ignored.
+                joints    = robot.get_joint_positions()             # list[float] × 6
+                state_vec = joints + [last_gripper_cmd]             # 7-dim
+                obs       = torch.tensor(state_vec, dtype=torch.float32).unsqueeze(0).to(device)
 
                 img = last_img
                 if camera is not None:
@@ -211,6 +218,7 @@ def run(args):
 
                 joints_cmd  = action[:6].tolist()
                 gripper_cmd = float(action[6])
+                last_gripper_cmd = gripper_cmd   # feeds back into next step's state vector
 
                 # ── execute ───────────────────────────────────────────────────
                 gripper.update(gripper_cmd)   # no-op unless threshold crossed

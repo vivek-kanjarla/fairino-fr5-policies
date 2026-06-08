@@ -118,12 +118,25 @@ def main():
                         help="policy under policies/<name>/ (default: act)")
     parser.add_argument("--config", default=None,
                         help="config yaml (default: policies/<policy>/config.yaml)")
+    parser.add_argument("--proprio", choices=["full", "dropout", "none"], default=None,
+                        help="override model.proprio_mode for a benchmark run; "
+                             "checkpoints are isolated under <ckpt_dir>/proprio_<mode>")
+    parser.add_argument("--proprio-rate", type=float, default=None,
+                        help="override model.proprio_dropout_rate (dropout mode only)")
     args = parser.parse_args()
 
     config_path = Path(args.config) if args.config else \
         REPO_ROOT / "policies" / args.policy / "config.yaml"
     with open(config_path) as f:
         cfg = yaml.safe_load(f)
+
+    # proprio benchmark overrides — isolate checkpoints so variants don't clobber
+    if args.proprio is not None:
+        cfg["model"]["proprio_mode"] = args.proprio
+        base = Path(cfg["training"]["checkpoint_dir"])
+        cfg["training"]["checkpoint_dir"] = str(base / f"proprio_{args.proprio}")
+    if args.proprio_rate is not None:
+        cfg["model"]["proprio_dropout_rate"] = args.proprio_rate
 
     policy_mod = load_policy_module(args.policy)
     print(f"policy: {args.policy}  config: {config_path}")

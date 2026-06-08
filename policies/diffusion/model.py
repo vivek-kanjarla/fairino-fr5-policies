@@ -39,6 +39,16 @@ from lerobot.policies.diffusion.configuration_diffusion import DiffusionConfig a
 from lerobot.policies.diffusion.modeling_diffusion import DiffusionPolicy
 from lerobot.configs.types import PolicyFeature, FeatureType, NormalizationMode
 
+# common/ is on sys.path when run via train.py / deploy.py; fall back to an
+# explicit path so the import works no matter how model.py gets loaded.
+try:
+    from proprio import ProprioConfig, mask_state, describe as _describe_proprio
+except ImportError:  # pragma: no cover
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "common"))
+    from proprio import ProprioConfig, mask_state, describe as _describe_proprio
+
 
 STATE_KEY = "observation.state"
 IMAGE_KEY = "observation.images.wrist_cam"
@@ -52,6 +62,10 @@ class DPConfig:
     chunk_size: int  = 16    # horizon — U-Net predicts this many action steps
     use_image:  bool = True
     n_action_steps: int = 8  # actions actually executed per chunk (≤ chunk_size)
+
+    # proprioception handling (see common/proprio.py): full | dropout | none
+    proprio_mode:         str   = "full"
+    proprio_dropout_rate: float = 0.3
 
     # U-Net architecture
     down_dims:                tuple = field(default_factory=lambda: (256, 512, 1024))
@@ -116,6 +130,15 @@ class DiffusionPol(nn.Module):
         self.cfg = cfg
         self.policy = DiffusionPolicy(_lerobot_config(cfg))
 
+        # proprioception mode (full | dropout | none) — applied in _make_batch
+        self.proprio = ProprioConfig(cfg.proprio_mode, cfg.proprio_dropout_rate)
+        if self.proprio.mode == "none" and not cfg.use_image:
+            raise ValueError(
+                "proprio_mode='none' (state-free) needs use_image=True — with no "
+                "camera and no state the diffusion U-Net has no conditioning.")
+        if self.proprio.active:
+            print(f"[Diffusion] {_describe_proprio(self.proprio)}")
+
         # mean-std normalization buffers
         self.register_buffer("state_mean",  torch.as_tensor(stats["state_mean"]).float())
         self.register_buffer("state_std",   torch.as_tensor(stats["state_std"]).float())
@@ -142,6 +165,7 @@ class DiffusionPol(nn.Module):
           Image: (B, C, H, W)       — same; queue adds the n_obs_steps dim
         """
         state = self._norm_state(obs_state)
+        state = mask_state(state, self.proprio, self.training)  # full/dropout/none
         if for_training:
             state = state.unsqueeze(1)      # (B, 1, state_dim)
         batch = {STATE_KEY: state}
@@ -201,5 +225,7 @@ def build_model(cfg: dict, stats: dict, device) -> DiffusionPol:
         vision_backbone=m.get("vision_backbone", "resnet18"),
         pretrained_backbone_weights=m.get("pretrained_backbone_weights",
                                           "ResNet18_Weights.IMAGENET1K_V1"),
+        proprio_mode=m.get("proprio_mode", "full"),
+        proprio_dropout_rate=m.get("proprio_dropout_rate", 0.3),
     )
     return DiffusionPol(model_cfg, stats).to(device)

@@ -27,6 +27,16 @@ from lerobot.policies.act.configuration_act import ACTConfig as _LRConfig
 from lerobot.policies.act.modeling_act import ACTPolicy
 from lerobot.configs.types import PolicyFeature, FeatureType, NormalizationMode
 
+# common/ is on sys.path when run via train.py / deploy.py; fall back to an
+# explicit path so the import works no matter how model.py gets loaded.
+try:
+    from proprio import ProprioConfig, mask_state, describe as _describe_proprio
+except ImportError:  # pragma: no cover
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "common"))
+    from proprio import ProprioConfig, mask_state, describe as _describe_proprio
+
 
 STATE_KEY = "observation.state"
 ENV_KEY = "observation.environment_state"
@@ -49,6 +59,10 @@ class ACTConfig:
     use_image:               bool         = True
     kl_weight:               float        = 10.0
     temporal_ensemble_coeff: float | None = 0.01
+
+    # proprioception handling (see common/proprio.py): full | dropout | none
+    proprio_mode:         str   = "full"
+    proprio_dropout_rate: float = 0.3
 
 
 def _lerobot_config(cfg: ACTConfig) -> _LRConfig:
@@ -105,6 +119,15 @@ class ACT(nn.Module):
         self.cfg = cfg
         self.policy = ACTPolicy(_lerobot_config(cfg))
 
+        # proprioception mode (full | dropout | none) — applied in _make_batch
+        self.proprio = ProprioConfig(cfg.proprio_mode, cfg.proprio_dropout_rate)
+        if self.proprio.mode == "none" and not cfg.use_image:
+            raise ValueError(
+                "proprio_mode='none' (state-free) needs use_image=True — with no "
+                "camera and no state there is nothing left to condition on.")
+        if self.proprio.active:
+            print(f"[ACT] {_describe_proprio(self.proprio)}")
+
         # mean/std normalisation buffers (saved in state_dict, restored on load)
         self.register_buffer("state_mean",  torch.as_tensor(stats["state_mean"]).float())
         self.register_buffer("state_std",   torch.as_tensor(stats["state_std"]).float())
@@ -118,6 +141,7 @@ class ACT(nn.Module):
 
     def _make_batch(self, obs_state, actions=None, action_is_pad=None, obs_image=None):
         state = self._norm_state(obs_state)              # (B, state_dim)
+        state = mask_state(state, self.proprio, self.training)  # full/dropout/none
         batch = {STATE_KEY: state}
         if self.cfg.use_image:
             if obs_image is None:
@@ -181,5 +205,7 @@ def build_model(cfg: dict, stats: dict, device) -> "ACT":
         use_image=d["use_image"],
         kl_weight=t["kl_weight"],
         temporal_ensemble_coeff=m.get("temporal_ensemble_coeff"),
+        proprio_mode=m.get("proprio_mode", "full"),
+        proprio_dropout_rate=m.get("proprio_dropout_rate", 0.3),
     )
     return ACT(model_cfg, stats).to(device)

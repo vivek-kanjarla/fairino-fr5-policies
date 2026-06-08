@@ -20,6 +20,7 @@ plain-English deep dives on each policy in this repo — what it is, how it work
 | 4 | [pi0.md](pi0.md) | **π0** | flow matching, but the encoder is a full 2B vision-language model (PaliGemma) |
 | 5 | [pi05.md](pi05.md) | **π0.5** | π0 tuned for open-world generalization (longer language, quantile norm, co-training) |
 | 6 | [pi0_fast.md](pi0_fast.md) | **π0-FAST** | π0's backbone, but actions become discrete tokens generated like text (no ODE) |
+| 7 | [octo.md](octo.md) | **Octo** | JAX generalist policy pretrained on 800k Open-X trajectories; zero-shot + finetune on FR5 |
 
 ---
 

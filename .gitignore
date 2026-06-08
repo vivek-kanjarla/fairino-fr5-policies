@@ -6,6 +6,8 @@ __pycache__/
 
 # ── virtual envs ────────────────────────────────────────
 .venv/
+# isolated JAX/Octo env (policies/octo/setup_env.sh)
+.venv-octo/
 venv/
 env/
 

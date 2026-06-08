@@ -1,0 +1,16 @@
+# Extra deps used by the FR5 Octo data adapter / scripts, on TOP of the `octo`
+# package and JAX (installed by setup_env.sh). The `octo` package itself pulls
+# flax, optax, distrax, orbax-checkpoint, transformers, tensorflow, einops, dlimp.
+#
+# These are the few things the FR5 adapter uses directly to read the LeRobot
+# dataset without depending on torch / lerobot (keeps the JAX venv lean).
+#
+# NOTE: numpy is pinned <2 because Octo's stack (TF 2.15, scipy 1.11, jax 0.4.20)
+# requires numpy<2. opencv/pandas are pinned to numpy-1.x-compatible releases so
+# they don't silently pull numpy 2 back in.
+numpy==1.26.4
+pyarrow>=14
+opencv-python-headless==4.9.0.80
+pillow>=10,<11
+tqdm>=4.66
+pandas>=2.0,<2.2

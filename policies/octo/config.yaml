@@ -1,0 +1,32 @@
+# Octo (JAX/Flax) config for the FR5.
+#
+# Octo is NOT a lerobot/PyTorch policy — it runs in its own isolated venv
+# (.venv-octo, see setup_env.sh) and has its own scripts:
+#   inference_pretrained.py   zero-shot inference with the Octo team's weights
+#   finetune.py               finetune on the FR5 LeRobot dataset
+#   inference_finetuned.py    inference with the finetuned checkpoint
+#
+# It does NOT use common/train.py or common/deploy.py (those are PyTorch).
+
+model:
+  pretrained: "hf://rail-berkeley/octo-base-1.5"   # Octo team weights (93M). small: octo-small-1.5 (27M)
+  window_size: 2          # frames of history Octo attends over (octo default = 2)
+  action_horizon: 4       # future actions predicted per step (octo default = 4)
+  action_dim: 7           # FR5: 6 joints (deg) + gripper_norm [0,1]
+
+dataset:
+  root: "../so101-fr5-teleop/lerobot_dataset"   # relative to repo root; same dataset as the torch policies
+  instruction: "pick up the block and place it in the bin"
+  image_key: "observation.images.wrist_cam"     # which camera maps to Octo's image_primary
+
+finetune:
+  steps: 5000
+  batch_size: 16
+  learning_rate: 3.0e-4
+  warmup_steps: 100
+  weight_decay: 0.01
+  freeze_transformer: false   # true = only train the action head (faster, less overfit on small data)
+  save_dir: "policies/octo/checkpoints"
+  save_every: 1000
+  log_every: 100
+  seed: 42

@@ -139,9 +139,16 @@ class ACT(nn.Module):
     def _norm_action(self, a):   return (a - self.action_mean) / self.action_std
     def _unnorm_action(self, a): return a * self.action_std + self.action_mean
 
-    def _make_batch(self, obs_state, actions=None, action_is_pad=None, obs_image=None):
+    def _make_batch(self, obs_state, actions=None, action_is_pad=None, obs_image=None,
+                    training=None):
+        # `training` gates proprio dropout: it is on only for the training forward
+        # pass. Defaults to the module flag (True in train(), False in eval()) but
+        # predict() forces False so dropout can never fire at inference, regardless
+        # of whether the caller remembered model.eval().
+        if training is None:
+            training = self.training
         state = self._norm_state(obs_state)              # (B, state_dim)
-        state = mask_state(state, self.proprio, self.training)  # full/dropout/none
+        state = mask_state(state, self.proprio, training)  # full/dropout/none
         batch = {STATE_KEY: state}
         if self.cfg.use_image:
             if obs_image is None:
@@ -182,7 +189,7 @@ class ACT(nn.Module):
     @torch.no_grad()
     def predict(self, obs_state, obs_image=None, task=None):
         action_norm = self.policy.select_action(
-            self._make_batch(obs_state, obs_image=obs_image)
+            self._make_batch(obs_state, obs_image=obs_image, training=False)
         )
         return self._unnorm_action(action_norm)
 

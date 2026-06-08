@@ -154,7 +154,7 @@ class DiffusionPol(nn.Module):
     # ── batch builder ──────────────────────────────────────────────────────────
 
     def _make_batch(self, obs_state, actions=None, action_is_pad=None,
-                    obs_image=None, for_training=True):
+                    obs_image=None, for_training=True, training=None):
         """
         for_training=True  (→ policy.forward / compute_loss)
           State: (B, 1, state_dim)  — compute_loss asserts shape[1] == n_obs_steps
@@ -163,9 +163,16 @@ class DiffusionPol(nn.Module):
         for_training=False  (→ policy.select_action via queue)
           State: (B, state_dim)     — queue stacks to (B, 1, state_dim)
           Image: (B, C, H, W)       — same; queue adds the n_obs_steps dim
+
+        `training` gates proprio dropout (vs `for_training`, which only controls
+        the state shape). It defaults to the module flag — True in train(), False
+        in eval() — so validation forward passes (eval mode, for_training=True)
+        correctly skip dropout. predict() forces training=False.
         """
+        if training is None:
+            training = self.training
         state = self._norm_state(obs_state)
-        state = mask_state(state, self.proprio, self.training)  # full/dropout/none
+        state = mask_state(state, self.proprio, training)  # full/dropout/none
         if for_training:
             state = state.unsqueeze(1)      # (B, 1, state_dim)
         batch = {STATE_KEY: state}
@@ -197,7 +204,8 @@ class DiffusionPol(nn.Module):
     def predict(self, obs_state, obs_image=None, task=None):
         """DDIM denoising → one action from the chunk, in original joint-space units."""
         action_norm = self.policy.select_action(
-            self._make_batch(obs_state, obs_image=obs_image, for_training=False)
+            self._make_batch(obs_state, obs_image=obs_image, for_training=False,
+                             training=False)
         )
         return self._unnorm_action(action_norm)
 

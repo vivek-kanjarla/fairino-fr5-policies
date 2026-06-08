@@ -99,8 +99,30 @@ loss, _    = bound.heads["action"].loss(embeddings, batch["action"], pad_mask, a
 grads      = jax.grad(loss)        # → apply_gradients
 ```
 
+### Finetuning modes — Octo does NOT use LoRA
+
+A frequent misconception is that Octo is finetuned with LoRA. It isn't. The official
+recipe (`octo-models/octo` `scripts/configs/finetune_config.py`) freezes parameters **by
+key pattern** via `frozen_keys`, in three modes:
+
+| Mode | `frozen_keys` | Trains | Use |
+|---|---|---|---|
+| `head_only` *(our default)* | `octo_transformer.*` | heads only | tiny datasets (FR5) — keep the 800k-trajectory visual prior, adapt only the action head |
+| `head_mlp_only` | `octo_transformer.*` + head map-head attn/probe | head MLP only | most conservative |
+| `full` | `None` | everything | Octo paper's default; more data + compute |
+
+`finetune.py` uses Octo's official `create_optimizer` — cosine LR (peak 3e-4, warmup),
+gradient clipping (global-norm 1.0), AdamW with **no weight decay on biases/LayerNorm** —
+plus the `frozen_keys` for the chosen mode. This is the exact pretrained recipe (no
+custom optimizer, no LoRA). Verified: `head_only`/`head_mlp_only` leave every transformer
+parameter unchanged; `full` updates them.
+
 Design choices for the FR5 (in `policies/octo/finetune.py`):
 
+- **Default `head_only`.** The FR5 dataset is tiny (~54 episodes); freezing the
+  800k-trajectory transformer and adapting only the action head is the most robust choice
+  (strong frozen feature extractor + a head re-mapped to FR5 actions). Switch to `full`
+  with `--mode full` once you have more data.
 - **Vision + language only, no proprioceptive state.** Octo's default obs is image +
   language — there is no joint-state input. This is *exactly* the state-free recipe that
   [`il_failure_modes.md`](il_failure_modes.md) and [`proprioception_modes.md`](proprioception_modes.md)
@@ -108,9 +130,6 @@ Design choices for the FR5 (in `policies/octo/finetune.py`):
 - **Wrist camera → `image_primary`** (256), `image_wrist` zeroed + masked.
 - **Action normalization** with the dataset's own mean/std (saved next to the checkpoint;
   reused to unnormalize at inference).
-- **Optional transformer freeze** (`--freeze-transformer`) — train only the action head.
-  On a small FR5 dataset this is often the safer choice (the 800k-trajectory transformer is
-  already a strong feature extractor; you mainly need to re-map the head to FR5 actions).
 
 The data adapter ([`fr5_octo_data.py`](../policies/octo/fr5_octo_data.py)) reads the LeRobot
 parquet + extracted frames directly (no torch/lerobot), windows them into Octo's

@@ -57,13 +57,28 @@ Loads the pretrained model and runs it on an FR5 wrist image + language instruct
 ## 3. Workflow 2 — finetune on the FR5 dataset
 
 ```bash
-python policies/octo/finetune.py --config policies/octo/config.yaml
+python policies/octo/finetune.py --config policies/octo/config.yaml   # default: head_only
+python policies/octo/finetune.py --mode full                          # train everything
+python policies/octo/finetune.py --mode head_mlp_only
 # quick smoke (tiny):
 python policies/octo/finetune.py --root _smoke_dataset --steps 50 --batch-size 4 \
     --save-dir /tmp/octo_fr5
-# train only the action head (faster, less overfit on small data):
-python policies/octo/finetune.py --freeze-transformer
 ```
+
+### Finetuning modes — Octo does NOT use LoRA
+
+A common misconception. Octo's official recipe freezes parameters **by key pattern**
+(`octo-models/octo` `scripts/configs/finetune_config.py`), not with LoRA adapters:
+
+| Mode | What trains | `frozen_keys` | When |
+|---|---|---|---|
+| `head_only` *(default)* | heads only; transformer frozen | `octo_transformer.*` | **tiny datasets like the FR5** — leans on the 800k-trajectory visual prior, least overfitting |
+| `head_mlp_only` | only the head MLP | `octo_transformer.*` + head map-head attn/probe | even more conservative |
+| `full` | everything | `None` | Octo paper's default; needs more data + compute |
+
+We use Octo's own `create_optimizer` (cosine LR, grad-clip 1.0, AdamW with no weight
+decay on biases/norms) + `frozen_keys` — the exact pretrained recipe. Verified: in
+`head_only`/`head_mlp_only` the transformer params don't move at all; in `full` they do.
 
 What it does:
 

@@ -6,6 +6,18 @@ on the recorded teleop episodes. FR5's action is 7-D (6 joints + gripper), which
 matches Octo's default action head (action_dim=7, action_horizon=4) — so NO head
 surgery is needed: we finetune the pretrained model directly.
 
+Finetuning modes — Octo does NOT use LoRA. The official recipe freezes parameters
+by key pattern (octo-models/octo scripts/configs/finetune_config.py):
+
+  full           train everything            (frozen_keys = None)
+  head_only      freeze the transformer,     (frozen_keys = "octo_transformer.*")
+                 train only the heads          ← best for a tiny dataset like the FR5
+  head_mlp_only  freeze transformer + head    (+ head map_head probe/attention)
+                 attention, train head MLP only
+
+We use Octo's official `create_optimizer` (cosine LR, grad-clip 1.0, AdamW wd=0.01,
+ViT-style no-wd on biases/norms) + `frozen_keys` — exactly the pretrained recipe.
+
 Key choices:
   * FR5 wrist camera -> Octo's image_primary (256x256); the unused image_wrist
     slot is fed zeros and masked out.
@@ -13,26 +25,35 @@ Key choices:
     checkpoint so inference can unnormalize back to FR5 joint commands).
   * Vision + language only, NO proprioceptive state input — which, by design,
     sidesteps the proprioceptive shortcut documented in docs/il_failure_modes.md.
-  * Optional --freeze-transformer trains only the action head (faster, less prone
-    to overfitting on small datasets).
 
 Run (inside .venv-octo, ideally on the Linux GPU box):
     python policies/octo/finetune.py --config policies/octo/config.yaml
-    python policies/octo/finetune.py --steps 50 --batch-size 4   # quick smoke
+    python policies/octo/finetune.py --mode full                       # train everything
+    python policies/octo/finetune.py --mode head_only --steps 50 --batch-size 4   # smoke
 """
 
 import argparse
 from pathlib import Path
 
 import jax
-import numpy as np
-import optax
 import yaml
 
 from octo_common import load_octo, save_stats, DEFAULT_MODEL
 from fr5_octo_data import FR5OctoData
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+# Octo's official frozen-key patterns per finetuning mode
+# (octo-models/octo scripts/configs/finetune_config.py). No LoRA — freeze by key.
+FROZEN_KEYS = {
+    "full": None,
+    "head_only": ("octo_transformer.*",),
+    "head_mlp_only": (
+        "octo_transformer.*",
+        "heads_*.map_head.probe",
+        "heads_*.map_head.MultiHeadDotProductAttention_0.*",
+    ),
+}
 
 
 def make_train_step(model):
@@ -66,14 +87,6 @@ def make_train_step(model):
     return train_step
 
 
-def freeze_transformer_mask(params):
-    """optax.masked mask: True = train (action head), False = freeze (transformer)."""
-    import flax.traverse_util as ftu
-    flat = ftu.flatten_dict(params)
-    mask = {k: ("octo_transformer" not in "/".join(k)) for k in flat}
-    return ftu.unflatten_dict(mask)
-
-
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--config", default=str(Path(__file__).parent / "config.yaml"))
@@ -82,7 +95,8 @@ def main():
     ap.add_argument("--steps", type=int, default=None)
     ap.add_argument("--batch-size", type=int, default=None)
     ap.add_argument("--save-dir", default=None, help="override checkpoint dir")
-    ap.add_argument("--freeze-transformer", action="store_true")
+    ap.add_argument("--mode", choices=list(FROZEN_KEYS), default=None,
+                    help="full | head_only | head_mlp_only (Octo official; no LoRA)")
     args = ap.parse_args()
 
     with open(args.config) as f:
@@ -96,7 +110,9 @@ def main():
     root = resolve(args.root or d["root"])
     steps = args.steps or ft["steps"]
     batch_size = args.batch_size or ft["batch_size"]
-    freeze = args.freeze_transformer or ft.get("freeze_transformer", False)
+    mode = args.mode or ft.get("mode", "head_only")
+    if mode not in FROZEN_KEYS:
+        raise SystemExit(f"unknown mode {mode!r}; use one of {list(FROZEN_KEYS)}")
     save_dir = resolve(args.save_dir or ft["save_dir"])
 
     # ── data ────────────────────────────────────────────────────────────────--
@@ -123,23 +139,30 @@ def main():
             f"({m['action_dim']}d,{m['action_horizon']}h). Reinitialize the head "
             "(from_config + merge_params) — see README §head-surgery.")
 
-    # ── optimizer ───────────────────────────────────────────────────────────--
-    lr = optax.warmup_cosine_decay_schedule(
-        init_value=0.0, peak_value=ft["learning_rate"],
-        warmup_steps=ft["warmup_steps"], decay_steps=steps,
-        end_value=ft["learning_rate"] * 0.1,
+    # ── optimizer (Octo's official create_optimizer: cosine LR + grad-clip +
+    #    AdamW no-wd-on-bias/norm + frozen_keys for the chosen mode) ──────────--
+    from octo.utils.train_utils import TrainState, process_text, create_optimizer
+    frozen_keys = FROZEN_KEYS[mode]
+    tx, lr_callable, _ = create_optimizer(
+        model.params,
+        learning_rate=dict(
+            name="cosine",
+            init_value=0.0,
+            peak_value=ft["learning_rate"],
+            warmup_steps=ft["warmup_steps"],
+            decay_steps=steps,
+            end_value=0.0,
+        ),
+        weight_decay=ft.get("weight_decay", 0.01),
+        clip_gradient=ft.get("grad_clip", 1.0),
+        frozen_keys=frozen_keys,
     )
-    tx = optax.adamw(lr, weight_decay=ft.get("weight_decay", 0.01))
-    if freeze:
-        tx = optax.masked(tx, freeze_transformer_mask(model.params))
-        print("[finetune] freezing transformer — training action head only")
-
-    from octo.utils.train_utils import TrainState, process_text
     state = TrainState.create(rng=jax.random.PRNGKey(ft["seed"]), model=model, tx=tx)
     train_step = make_train_step(model)
 
     # ── loop ────────────────────────────────────────────────────────────────--
-    print(f"[finetune] {steps} steps  batch={batch_size}  lr={ft['learning_rate']}  freeze={freeze}\n")
+    print(f"[finetune] mode={mode}  frozen_keys={frozen_keys}")
+    print(f"[finetune] {steps} steps  batch={batch_size}  peak_lr={ft['learning_rate']}\n")
     log_every, save_every = ft.get("log_every", 100), ft.get("save_every", 1000)
     for step in range(1, steps + 1):
         batch = process_text(data.sample_batch(batch_size), model.text_processor)

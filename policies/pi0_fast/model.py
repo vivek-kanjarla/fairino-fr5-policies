@@ -34,6 +34,16 @@ from lerobot.policies.pi0_fast.configuration_pi0_fast import PI0FastConfig as _L
 from lerobot.policies.pi0_fast.modeling_pi0_fast import PI0FastPolicy
 from lerobot.configs.types import PolicyFeature, FeatureType, NormalizationMode
 
+# common/ is on sys.path when run via train.py / deploy.py; fall back to an
+# explicit path so the import works no matter how model.py gets loaded.
+try:
+    from proprio import ProprioConfig, mask_state, describe as _describe_proprio
+except ImportError:  # pragma: no cover
+    import sys as _sys
+    from pathlib import Path as _Path
+    _sys.path.insert(0, str(_Path(__file__).resolve().parents[2] / "common"))
+    from proprio import ProprioConfig, mask_state, describe as _describe_proprio
+
 try:
     from transformers import AutoTokenizer
     _HAS_TOKENIZER = True
@@ -58,6 +68,10 @@ class Pi0FastConfig:
     chunk_size: int  = 50
     use_image:  bool = True
     max_state_dim:  int = 32
+
+    # proprioception handling (see common/proprio.py): full | dropout | none
+    proprio_mode:         str   = "full"
+    proprio_dropout_rate: float = 0.3
     max_action_dim: int = 32
     tokenizer_max_length: int = 200
 
@@ -96,6 +110,11 @@ class Pi0Fast(nn.Module):
         self.cfg    = cfg
         self.policy = PI0FastPolicy(_lerobot_config(cfg))
 
+        # proprioception mode (full | dropout | none) — applied in _make_batch.
+        self.proprio = ProprioConfig(cfg.proprio_mode, cfg.proprio_dropout_rate)
+        if self.proprio.active:
+            print(f"[pi0_fast] {_describe_proprio(self.proprio)}")
+
         if _HAS_TOKENIZER:
             try:
                 self.tokenizer = AutoTokenizer.from_pretrained(_TEXT_TOKENIZER)
@@ -131,12 +150,14 @@ class Pi0Fast(nn.Module):
         return enc["input_ids"].to(device), enc["attention_mask"].to(device)
 
     def _make_batch(self, obs_state, actions=None, action_is_pad=None,
-                    obs_image=None, task=None):
+                    obs_image=None, task=None, training=None):
         # State: always (B, state_dim) — pi0_fast adds seq dim internally.
+        if training is None:
+            training = self.training
         dev  = obs_state.device
         B    = obs_state.shape[0]
         task = task or [""] * B
-        batch = {STATE_KEY: self._norm_state(obs_state)}
+        batch = {STATE_KEY: mask_state(self._norm_state(obs_state), self.proprio, training)}
         if self.cfg.use_image and obs_image is not None:
             batch[IMAGE_KEY] = self._to_raw(obs_image)
         ids, mask = self._tokenize(task, dev)
@@ -160,7 +181,7 @@ class Pi0Fast(nn.Module):
     @torch.no_grad()
     def predict(self, obs_state, obs_image=None, task=None):
         action_norm = self.policy.select_action(
-            self._make_batch(obs_state, obs_image=obs_image, task=task)
+            self._make_batch(obs_state, obs_image=obs_image, task=task, training=False)
         )
         return self._unnorm_action(action_norm)
 
@@ -173,5 +194,7 @@ def build_model(cfg: dict, stats: dict, device) -> Pi0Fast:
         max_state_dim=m.get("max_state_dim", 32),
         max_action_dim=m.get("max_action_dim", 32),
         tokenizer_max_length=m.get("tokenizer_max_length", 200),
+        proprio_mode=m.get("proprio_mode", "full"),
+        proprio_dropout_rate=m.get("proprio_dropout_rate", 0.3),
     )
     return Pi0Fast(model_cfg, stats).to(device)

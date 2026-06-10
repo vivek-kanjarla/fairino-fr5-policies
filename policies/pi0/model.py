@@ -36,6 +36,16 @@ from lerobot.policies.pi0.configuration_pi0 import PI0Config as _LRConfig
 from lerobot.policies.pi0.modeling_pi0 import PI0Policy
 from lerobot.configs.types import PolicyFeature, FeatureType, NormalizationMode
 
+# common/ is on sys.path when run via train.py / deploy.py; fall back to an
+# explicit path so the import works no matter how model.py gets loaded.
+try:
+    from proprio import ProprioConfig, mask_state, describe as _describe_proprio
+except ImportError:  # pragma: no cover
+    import sys as _sys
+    from pathlib import Path as _Path
+    _sys.path.insert(0, str(_Path(__file__).resolve().parents[2] / "common"))
+    from proprio import ProprioConfig, mask_state, describe as _describe_proprio
+
 try:
     from transformers import AutoTokenizer
     _HAS_TOKENIZER = True
@@ -71,6 +81,10 @@ class Pi0Config:
     paligemma_variant:    str = "gemma_2b"
     action_expert_variant: str = "gemma_300m"
     tokenizer_max_length:  int = 48
+
+    # proprioception handling (see common/proprio.py): full | dropout | none
+    proprio_mode:         str   = "full"
+    proprio_dropout_rate: float = 0.3
 
 
 def _lerobot_config(cfg: Pi0Config) -> _LRConfig:
@@ -108,6 +122,12 @@ class Pi0(nn.Module):
         super().__init__()
         self.cfg    = cfg
         self.policy = PI0Policy(_lerobot_config(cfg))
+
+        # proprioception mode (full | dropout | none) — applied in _make_batch.
+        # pi0 always has language conditioning, so 'none' is valid with or without image.
+        self.proprio = ProprioConfig(cfg.proprio_mode, cfg.proprio_dropout_rate)
+        if self.proprio.active:
+            print(f"[pi0] {_describe_proprio(self.proprio)}")
 
         # load tokenizer (requires HF auth + PaliGemma licence)
         if _HAS_TOKENIZER:
@@ -150,7 +170,7 @@ class Pi0(nn.Module):
         return enc["input_ids"].to(device), enc["attention_mask"].to(device)
 
     def _make_batch(self, obs_state, actions=None, action_is_pad=None,
-                    obs_image=None, task=None):
+                    obs_image=None, task=None, training=None):
         """Build batch for PI0Policy.
 
         State shape: always (B, state_dim) — NO n_obs_steps unsqueeze.
@@ -161,11 +181,14 @@ class Pi0(nn.Module):
         Images: (B, C, H, W) in [0,1]; _preprocess_images converts to [-1,1].
         Actions: (B, chunk_size, action_dim); prepare_action pads to max_action_dim.
         """
+        if training is None:
+            training = self.training
         dev  = obs_state.device
         B    = obs_state.shape[0]
         task = task or [""] * B
 
-        batch = {STATE_KEY: self._norm_state(obs_state)}   # (B, state_dim)
+        state = mask_state(self._norm_state(obs_state), self.proprio, training)
+        batch = {STATE_KEY: state}                         # (B, state_dim), full/dropout/none
 
         if self.cfg.use_image and obs_image is not None:
             batch[IMAGE_KEY] = self._to_raw(obs_image)     # (B, C, H, W) in [0,1]
@@ -193,7 +216,7 @@ class Pi0(nn.Module):
     @torch.no_grad()
     def predict(self, obs_state, obs_image=None, task=None):
         action_norm = self.policy.select_action(
-            self._make_batch(obs_state, obs_image=obs_image, task=task)
+            self._make_batch(obs_state, obs_image=obs_image, task=task, training=False)
         )
         return self._unnorm_action(action_norm)
 
@@ -211,5 +234,7 @@ def build_model(cfg: dict, stats: dict, device) -> Pi0:
         paligemma_variant=m.get("paligemma_variant", "gemma_2b"),
         action_expert_variant=m.get("action_expert_variant", "gemma_300m"),
         tokenizer_max_length=m.get("tokenizer_max_length", 48),
+        proprio_mode=m.get("proprio_mode", "full"),
+        proprio_dropout_rate=m.get("proprio_dropout_rate", 0.3),
     )
     return Pi0(model_cfg, stats).to(device)

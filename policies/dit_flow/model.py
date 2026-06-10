@@ -43,6 +43,16 @@ from lerobot.policies.multi_task_dit.configuration_multi_task_dit import (
 from lerobot.policies.multi_task_dit.modeling_multi_task_dit import MultiTaskDiTPolicy
 from lerobot.configs.types import PolicyFeature, FeatureType, NormalizationMode
 
+# common/ is on sys.path when run via train.py / deploy.py; fall back to an
+# explicit path so the import works no matter how model.py gets loaded.
+try:
+    from proprio import ProprioConfig, mask_state, describe as _describe_proprio
+except ImportError:  # pragma: no cover
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "common"))
+    from proprio import ProprioConfig, mask_state, describe as _describe_proprio
+
 
 # ── batch key constants ────────────────────────────────────────────────────────
 STATE_KEY      = "observation.state"
@@ -82,6 +92,10 @@ class DiTFlowConfig:
     vision_encoder_name:  str = "openai/clip-vit-base-patch16"
     text_encoder_name:    str = "openai/clip-vit-base-patch16"
     tokenizer_max_length: int = 77
+
+    # proprioception handling (see common/proprio.py): full | dropout | none
+    proprio_mode:         str   = "full"
+    proprio_dropout_rate: float = 0.3
 
 
 def _lerobot_config(cfg: DiTFlowConfig) -> _LRConfig:
@@ -127,6 +141,15 @@ class DiTFlow(nn.Module):
         super().__init__()
         self.cfg = cfg
         self.policy = MultiTaskDiTPolicy(_lerobot_config(cfg))
+
+        # proprioception mode (full | dropout | none) — applied in _make_batch
+        self.proprio = ProprioConfig(cfg.proprio_mode, cfg.proprio_dropout_rate)
+        if self.proprio.mode == "none" and not cfg.use_image:
+            raise ValueError(
+                "proprio_mode='none' (state-free) needs use_image=True — with no "
+                "camera and no state the DiT has only language to condition on.")
+        if self.proprio.active:
+            print(f"[DiT-Flow] {_describe_proprio(self.proprio)}")
 
         # language tokenizer (same CLIP checkpoint as the text encoder)
         self.tokenizer = AutoTokenizer.from_pretrained(cfg.text_encoder_name)
@@ -176,7 +199,7 @@ class DiTFlow(nn.Module):
     # ── batch builder ──────────────────────────────────────────────────────────
 
     def _make_batch(self, obs_state, actions=None, action_is_pad=None,
-                    obs_image=None, task=None, for_training=True):
+                    obs_image=None, task=None, for_training=True, training=None):
         """Build a batch dict for lerobot's MultiTaskDiTPolicy.
 
         Two distinct modes:
@@ -193,10 +216,13 @@ class DiTFlow(nn.Module):
         Language tokens are always (B, max_length); encode handles the n_obs_steps
         expansion internally. They are NOT queued (not in policy._queues).
         """
+        if training is None:
+            training = self.training
         dev = obs_state.device
         B   = obs_state.shape[0]
 
         state = self._norm_state(obs_state)
+        state = mask_state(state, self.proprio, training)   # full/dropout/none
         if for_training:
             state = state.unsqueeze(1)    # → (B, 1, state_dim) for encode()
         batch = {STATE_KEY: state}
@@ -242,7 +268,8 @@ class DiTFlow(nn.Module):
         Call reset() at the start of each episode to clear the queue.
         """
         action_norm = self.policy.select_action(
-            self._make_batch(obs_state, obs_image=obs_image, task=task, for_training=False)
+            self._make_batch(obs_state, obs_image=obs_image, task=task,
+                             for_training=False, training=False)
         )
         return self._unnorm_action(action_norm)
 
@@ -266,5 +293,7 @@ def build_model(cfg: dict, stats: dict, device) -> DiTFlow:
         vision_encoder_name=m.get("vision_encoder_name", "openai/clip-vit-base-patch16"),
         text_encoder_name=m.get("text_encoder_name", "openai/clip-vit-base-patch16"),
         tokenizer_max_length=m.get("tokenizer_max_length", 77),
+        proprio_mode=m.get("proprio_mode", "full"),
+        proprio_dropout_rate=m.get("proprio_dropout_rate", 0.3),
     )
     return DiTFlow(model_cfg, stats).to(device)

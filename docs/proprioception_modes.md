@@ -5,7 +5,9 @@ proprioceptive state vs vision. This is the practical lever for attacking the
 proprioceptive shortcut documented in [`il_failure_modes.md`](il_failure_modes.md).
 
 Implemented as a shared wrapper in [`common/proprio.py`](../common/proprio.py),
-wired into **ACT** and **Diffusion Policy** (more policies plug in the same way).
+wired into **all six policies** — ACT, Diffusion Policy, DiT-Flow, π0, π0.5, and
+π0-FAST — so the same `--proprio {full,dropout,none}` benchmark switch works
+across the whole repo.
 
 ---
 
@@ -192,13 +194,16 @@ straightness per rollout to see whether any mode changes it.
 
 | File | Change |
 |---|---|
-| `common/proprio.py` | New — `ProprioConfig`, `mask_state`, `describe` |
-| `policies/act/model.py` | Build `ProprioConfig`, call `mask_state` in `_make_batch` |
-| `policies/diffusion/model.py` | Same wiring |
-| `policies/act/config.yaml` | `proprio_mode`, `proprio_dropout_rate` keys |
-| `policies/diffusion/config.yaml` | Same keys |
+| `common/proprio.py` | `ProprioConfig`, `mask_state`, `describe` |
+| `policies/{act,diffusion,dit_flow,pi0,pi05,pi0_fast}/model.py` | Build `ProprioConfig`, call `mask_state` in `_make_batch`; `predict()` forces `training=False` |
+| `policies/{act,diffusion,dit_flow,pi0,pi05,pi0_fast}/config.yaml` | `proprio_mode`, `proprio_dropout_rate` keys |
 | `common/train.py` | `--proprio` / `--proprio-rate` CLI overrides + checkpoint isolation |
 | `common/deploy.py` | Feeds 7-dim state (joints + last gripper cmd); mode applied automatically by the model |
 
-Adding the same support to `dit_flow`, `pi0`, etc. is the identical two-line
-wiring in each wrapper plus the two config keys.
+All six policies share the identical wiring (`ProprioConfig` in `__init__` +
+`mask_state` after normalizing the state). For the **π0 family** (`pi0`, `pi05`,
+`pi0_fast`), `none` mode is valid even without a camera because they always have
+language conditioning — they are vision-**and**-language models. The masking was
+runtime-verified on ACT, Diffusion, and DiT-Flow; the π0 family uses the same
+code path but can't be loaded here (it needs PaliGemma weights), so it was
+compile-verified only.

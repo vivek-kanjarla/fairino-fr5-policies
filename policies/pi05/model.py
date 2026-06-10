@@ -27,6 +27,16 @@ from lerobot.policies.pi05.configuration_pi05 import PI05Config as _LRConfig
 from lerobot.policies.pi05.modeling_pi05 import PI05Policy
 from lerobot.configs.types import PolicyFeature, FeatureType, NormalizationMode
 
+# common/ is on sys.path when run via train.py / deploy.py; fall back to an
+# explicit path so the import works no matter how model.py gets loaded.
+try:
+    from proprio import ProprioConfig, mask_state, describe as _describe_proprio
+except ImportError:  # pragma: no cover
+    import sys as _sys
+    from pathlib import Path as _Path
+    _sys.path.insert(0, str(_Path(__file__).resolve().parents[2] / "common"))
+    from proprio import ProprioConfig, mask_state, describe as _describe_proprio
+
 try:
     from transformers import AutoTokenizer
     _HAS_TOKENIZER = True
@@ -56,6 +66,10 @@ class Pi05Config:
     paligemma_variant:     str = "gemma_2b"
     action_expert_variant: str = "gemma_300m"
     tokenizer_max_length:  int = 200    # longer than pi0's 48
+
+    # proprioception handling (see common/proprio.py): full | dropout | none
+    proprio_mode:         str   = "full"
+    proprio_dropout_rate: float = 0.3
 
 
 def _lerobot_config(cfg: Pi05Config) -> _LRConfig:
@@ -94,6 +108,11 @@ class Pi05(nn.Module):
         self.cfg    = cfg
         self.policy = PI05Policy(_lerobot_config(cfg))
 
+        # proprioception mode (full | dropout | none) — applied in _make_batch.
+        self.proprio = ProprioConfig(cfg.proprio_mode, cfg.proprio_dropout_rate)
+        if self.proprio.active:
+            print(f"[pi05] {_describe_proprio(self.proprio)}")
+
         if _HAS_TOKENIZER:
             try:
                 self.tokenizer = AutoTokenizer.from_pretrained(_PALIGEMMA_TOKENIZER)
@@ -129,12 +148,14 @@ class Pi05(nn.Module):
         return enc["input_ids"].to(device), enc["attention_mask"].to(device)
 
     def _make_batch(self, obs_state, actions=None, action_is_pad=None,
-                    obs_image=None, task=None):
+                    obs_image=None, task=None, training=None):
         # State: always (B, state_dim) — pi05 adds seq dim internally in embed_suffix.
+        if training is None:
+            training = self.training
         dev  = obs_state.device
         B    = obs_state.shape[0]
         task = task or [""] * B
-        batch = {STATE_KEY: self._norm_state(obs_state)}
+        batch = {STATE_KEY: mask_state(self._norm_state(obs_state), self.proprio, training)}
         if self.cfg.use_image and obs_image is not None:
             batch[IMAGE_KEY] = self._to_raw(obs_image)
         ids, mask = self._tokenize(task, dev)
@@ -157,7 +178,7 @@ class Pi05(nn.Module):
     @torch.no_grad()
     def predict(self, obs_state, obs_image=None, task=None):
         action_norm = self.policy.select_action(
-            self._make_batch(obs_state, obs_image=obs_image, task=task)
+            self._make_batch(obs_state, obs_image=obs_image, task=task, training=False)
         )
         return self._unnorm_action(action_norm)
 
@@ -173,5 +194,7 @@ def build_model(cfg: dict, stats: dict, device) -> Pi05:
         paligemma_variant=m.get("paligemma_variant", "gemma_2b"),
         action_expert_variant=m.get("action_expert_variant", "gemma_300m"),
         tokenizer_max_length=m.get("tokenizer_max_length", 200),
+        proprio_mode=m.get("proprio_mode", "full"),
+        proprio_dropout_rate=m.get("proprio_dropout_rate", 0.3),
     )
     return Pi05(model_cfg, stats).to(device)

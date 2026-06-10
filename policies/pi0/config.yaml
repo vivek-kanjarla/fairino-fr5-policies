@@ -27,6 +27,11 @@ model:
   # flow-matching inference
   num_inference_steps: 10
 
+  # proprioception handling — benchmark axis (see docs/proprioception_modes.md)
+  #   full | dropout | none   (override: python common/train.py --policy pi0 --proprio none)
+  proprio_mode: full
+  proprio_dropout_rate: 0.3
+
 training:
   batch_size: 4           # pi0 is large — reduce if OOM
   lr: 2.5e-5

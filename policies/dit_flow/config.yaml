@@ -32,6 +32,11 @@ model:
   text_encoder_name: "openai/clip-vit-base-patch16"
   tokenizer_max_length: 77
 
+  # proprioception handling — benchmark axis (see docs/proprioception_modes.md)
+  #   full | dropout | none   (override: python common/train.py --policy dit_flow --proprio none)
+  proprio_mode: full
+  proprio_dropout_rate: 0.3
+
 training:
   batch_size: 8
   lr: 2.0e-5
